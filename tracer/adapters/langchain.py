@@ -1,6 +1,6 @@
 import time
 from typing import Any, Union
-from langchain.callbacks.base import BaseCallbackHandler
+from langchain_classic.callbacks.base import BaseCallbackHandler
 from tracer.adapters.base import BaseAdapter
 from tracer.node import Node, NodeType
 from tracer.core import TracerCore
@@ -55,6 +55,9 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         self._active_reasoning_node.tokens_in = tokens_in
         self._active_reasoning_node.tokens_out = tokens_out
 
+         # re-push updated node so database gets the response
+        if self.core.write_queue:
+            self.core.write_queue.push(self._active_reasoning_node)
         self.on_reasoning_end(
             self._active_reasoning_node,
             response_text

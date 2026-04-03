@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     memory_snapshot JSONB,
     agent_state_snapshot JSONB,
     tool_config_snapshot JSONB,
-    embedding_vector vector(1536)
+    embedding_vector vector(896)
 );
 """
 
@@ -83,14 +83,17 @@ class DatabaseWriter:
                     $12,$13,$14,$15,$16,$17,$18,$19,$20,
                     $21,$22,$23
                 )
-                ON CONFLICT (node_id) DO UPDATE SET
+               ON CONFLICT (node_id) DO UPDATE SET
                     response_text = EXCLUDED.response_text,
                     latency_ms = EXCLUDED.latency_ms,
                     tokens_in = EXCLUDED.tokens_in,
                     tokens_out = EXCLUDED.tokens_out,
                     raw_output = EXCLUDED.raw_output,
                     status = EXCLUDED.status,
-                    error_message = EXCLUDED.error_message
+                    error_message = EXCLUDED.error_message,
+                    prompt_text = EXCLUDED.prompt_text,
+                    tool_name = EXCLUDED.tool_name,
+                    input_params = EXCLUDED.input_params
                 """,
                 [
                     (

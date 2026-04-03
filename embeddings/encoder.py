@@ -4,6 +4,7 @@ import logging
 import os
 from typing import Optional
 from openai import AsyncOpenAI
+from langchain_ollama import OllamaEmbeddings
 from dotenv import load_dotenv
 from tracer.node import Node, NodeType
 
@@ -11,8 +12,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
+EMBEDDING_MODEL = "qwen2.5:0.5b"
+EMBEDDING_DIM = 3071
 
 class EmbeddingEncoder:
     """
@@ -22,8 +23,8 @@ class EmbeddingEncoder:
     """
 
     def __init__(self):
-        self.client = AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY")
+        self.embeddings = OllamaEmbeddings(
+            model="qwen2.5:0.5b"
         )
 
     async def encode_node(self, node: Node) -> list[float]:
@@ -132,16 +133,14 @@ ACTION TAKEN:
         return None
 
     async def _embed(self, text: str) -> list[float]:
-        """
-        Call OpenAI embedding API.
-        Returns a 1536 dimensional vector.
-        """
         try:
-            response = await self.client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=text
+            loop = asyncio.get_event_loop()
+            vector = await loop.run_in_executor(
+                None,
+                self.embeddings.embed_query,
+                text
             )
-            return response.data[0].embedding
+            return vector
         except Exception as e:
             logger.error(f"Embedding API call failed: {e}")
             raise

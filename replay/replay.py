@@ -4,10 +4,11 @@ import os
 from typing import Optional, AsyncGenerator
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain.tools import BaseTool
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_ollama import ChatOllama
+from langchain_classic.agents import AgentExecutor, create_openai_tools_agent
+from langchain_classic.tools import BaseTool
+from langchain_classic.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_classic.schema.messages import HumanMessage, AIMessage, SystemMessage
 from storage.database import DatabaseWriter
 from tracer.node import NodeType
 
@@ -119,8 +120,10 @@ class ReplayEngine:
                 "errors": len(error_nodes),
                 "last_tool_used": tool_call_nodes[-1]["tool_name"]
                     if tool_call_nodes else None,
-                "last_reasoning": reasoning_nodes[-1]["response_text"]
-                    if reasoning_nodes else None,
+                "last_reasoning": (
+                        reasoning_nodes[-1].get("response_text") or
+                        reasoning_nodes[-1].get("prompt_text", "")[:100]
+                    ) if reasoning_nodes else None,
             },
 
             # causal chain to this node
@@ -200,11 +203,10 @@ class ReplayEngine:
         ])
 
         # build llm
-        llm = ChatOpenAI(
-            model="gpt-4o",
-            temperature=0,
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
+        llm = ChatOllama(
+        model="qwen2.5:0.5b",
+        temperature=0,
+)
 
         # attach tracer if provided
         callbacks = []
