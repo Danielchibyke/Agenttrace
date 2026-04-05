@@ -11,15 +11,21 @@ class TracerCore:
     Does not know or care which framework is running.
     """
 
-    def __init__(self, task_id: str = None, write_queue=None):
-        self.session_id = str(uuid.uuid4())
-        self.task_id = task_id or str(uuid.uuid4())
-        self.tree = ExecutionTree(
-            session_id=self.session_id,
-            task_id=self.task_id
-        )
-        self.write_queue = write_queue
-        self._current_parent_id = None
+    def __init__(
+            self,
+            task_id: str = None,
+            write_queue=None,
+            token_buffer=None
+        ):
+            self.session_id = str(uuid.uuid4())
+            self.task_id = task_id or str(uuid.uuid4())
+            self.tree = ExecutionTree(
+                session_id=self.session_id,
+                task_id=self.task_id
+            )
+            self.write_queue = write_queue
+            self.token_buffer = token_buffer
+            self._current_parent_id = None
 
     def record_node(self, node: Node) -> Node:
         node.session_id = self.session_id

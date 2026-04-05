@@ -1,33 +1,39 @@
 import asyncio
 import uuid
 import os
+import logging
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import ChatOllama
-from langchain_classic.agents import AgentExecutor, create_openai_tools_agent
+from langchain_classic.agents import (
+    AgentExecutor,
+    create_openai_tools_agent
+)
 from langchain_classic.tools import tool
-from langchain_classic.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_classic.prompts import (
+    ChatPromptTemplate,
+    MessagesPlaceholder
+)
 
 from tracer.core import TracerCore
 from tracer.adapters.langchain import LangChainAdapter
 from tracer.queue import AsyncWriteQueue
+from tracer.streaming.token_buffer import TokenBuffer
 from storage.database import DatabaseWriter
 from storage.vector import VectorStorage
 from embeddings.encoder import EmbeddingEncoder
 from replay.replay import ReplayEngine
 
 load_dotenv()
+logging.basicConfig(level=logging.WARNING)
 
 # -------------------------------------------------
-# define some simple test tools for the agent
+# test tools
 # -------------------------------------------------
 
 @tool
 def search_web(query: str) -> str:
     """Search the web for information."""
-    return f"Search results for '{query}': This is a simulated result."
+    return f"Search results for '{query}': Simulated result."
 
 @tool
 def calculate(expression: str) -> str:
@@ -46,6 +52,56 @@ def save_note(content: str) -> str:
 TOOLS = [search_web, calculate, save_note]
 
 # -------------------------------------------------
+# micro node handler — Track A visualizer dispatch
+# -------------------------------------------------
+
+async def on_micro_node_visualizer(micro_node):
+    """
+    Called immediately for every token captured.
+    Sends raw token to visualizer without waiting
+    for embedding.
+    """
+    pass  # wired to WebSocket in server.py
+
+
+# -------------------------------------------------
+# batch handler — Track B embedding pipeline
+# -------------------------------------------------
+
+async def make_batch_handler(
+    encoder: EmbeddingEncoder,
+    db_writer: DatabaseWriter
+):
+    async def on_batch_ready(batch):
+        """
+        Called every 100ms with a batch of micro nodes.
+        Embeds them and stores to database.
+        """
+        texts = [m.content for m in batch]
+        try:
+            loop = asyncio.get_event_loop()
+            vectors = await loop.run_in_executor(
+                None,
+                lambda: encoder.embeddings.embed_documents(texts)
+            )
+            for micro_node, vector in zip(batch, vectors):
+                micro_node.embedding_vector = vector
+                micro_node.embedding_complete = True
+
+            await db_writer.write_micro_nodes(batch)
+
+            for micro_node, vector in zip(batch, vectors):
+                await db_writer.update_micro_node_embedding(
+                    micro_node.micro_id, vector
+                )
+
+        except Exception as e:
+            logging.error(f"Batch embedding failed: {e}")
+
+    return on_batch_ready
+
+
+# -------------------------------------------------
 # main pipeline
 # -------------------------------------------------
 
@@ -59,32 +115,60 @@ async def run_agent(task: str, task_id: str = None):
     await db_writer.connect()
     print("Database connected.")
 
+    # setup encoder
+    encoder = EmbeddingEncoder()
+
     # setup write queue
     write_queue = AsyncWriteQueue(db_writer=db_writer)
     await write_queue.start()
-    print("Write queue started.")
+
+    # setup token buffer with both track handlers
+    batch_handler = await make_batch_handler(
+        encoder, db_writer
+    )
+    token_buffer = TokenBuffer(
+        session_id=str(uuid.uuid4()),
+        batch_size=20,
+        batch_interval_ms=100,
+        on_visualizer_dispatch=on_micro_node_visualizer,
+        on_batch_ready=batch_handler,
+    )
+    await token_buffer.start()
+    print("Token buffer started.")
 
     # setup tracer core
     tracer_core = TracerCore(
         task_id=task_id or str(uuid.uuid4()),
-        write_queue=write_queue
+        write_queue=write_queue,
+        token_buffer=token_buffer,
     )
 
-    # setup langchain adapter
-    adapter = LangChainAdapter(tracer_core=tracer_core)
+    # setup langchain adapter with token buffer
+    adapter = LangChainAdapter(
+        tracer_core=tracer_core,
+        token_buffer=token_buffer,
+        on_micro_node=on_micro_node_visualizer,
+    )
 
-    # setup llm
+    # setup llm with streaming enabled
     llm = ChatOllama(
-    model="qwen2.5:0.5b",
-    temperature=0,
-)
+        model="llama3.2",
+        temperature=0,
+        streaming=True,
+    )
+
     # setup prompt
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful AI assistant. "
-                   "Use tools to complete tasks thoroughly."),
+        (
+            "system",
+            "You are a helpful AI assistant. "
+            "Use tools to complete tasks thoroughly."
+        ),
         MessagesPlaceholder(variable_name="chat_history"),
         ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
+        MessagesPlaceholder(
+            variable_name="agent_scratchpad"
+        ),
     ])
 
     # build agent
@@ -93,27 +177,27 @@ async def run_agent(task: str, task_id: str = None):
         agent=agent,
         tools=TOOLS,
         callbacks=[adapter],
-        verbose=True,
+        verbose=False,
         return_intermediate_steps=True
     )
 
     # run agent
-    result = await executor.ainvoke(
-        {"input": task, "chat_history": []},
-        config={"callbacks": [adapter]} 
-    )
+    print("Agent running...\n")
+    result = await executor.ainvoke({
+        "input": task,
+        "chat_history": [],
+    })
 
-    print(f"\nAGENT OUTPUT: {result['output']}")
+    print(f"\nAGENT OUTPUT:\n{result['output']}\n")
 
-    # stop queue and flush remaining nodes
+    # stop token buffer — flushes remaining tokens
+    await token_buffer.stop()
+
+    # stop write queue — flushes remaining nodes
     await write_queue.stop()
 
-    # wait briefly to ensure all nodes are flushed
-    await asyncio.sleep(1)
-   # compute embeddings concurrently as agent runs
-    # embed nodes one by one as soon as they're in the db
-    print("\nComputing embeddings...")
-    encoder = EmbeddingEncoder()
+    # embed parent nodes
+    print("Embedding parent nodes...")
     vector_storage = VectorStorage(db_writer.pool)
     all_nodes = tracer_core.get_tree().get_all_nodes()
 
@@ -125,25 +209,32 @@ async def run_agent(task: str, task_id: str = None):
                 await vector_storage.store_embedding(
                     node.node_id, vector
                 )
-                print(f"  Embedded: {node.node_type.value} "
-                      f"step {node.step_number}")
         except Exception as e:
-            print(f"  Failed to embed node {node.node_id}: {e}")
+            print(f"Failed to embed node: {e}")
 
-    print(f"Done. {len(all_nodes)} nodes embedded.")
-
-    # final flush — ensures last node is visible
     await asyncio.sleep(0.5)
 
+    # print summary
     summary = tracer_core.get_summary()
-    print(f"\nEXECUTION SUMMARY:")
-    print(f"  Session ID:      {tracer_core.session_id}")
-    print(f"  Total nodes:     {summary['total_nodes']}")
-    print(f"  Reasoning hops:  {summary['reasoning_hops']}")
+    micro_nodes = token_buffer.get_all_micro_nodes()
+    embedded_micro = sum(
+        1 for m in micro_nodes if m.embedding_complete
+    )
+
+    print(f"EXECUTION SUMMARY:")
+    print(f"  Session ID:       {tracer_core.session_id}")
+    print(f"  Parent nodes:     {summary['total_nodes']}")
+    print(f"  Reasoning hops:   {summary['reasoning_hops']}")
+    print(f"  Micro nodes:      {len(micro_nodes)}")
+    print(f"  Embedded micro:   {embedded_micro}")
 
     await db_writer.close()
     return tracer_core.session_id
 
+
+# -------------------------------------------------
+# observe mode
+# -------------------------------------------------
 
 async def demo_observe(session_id: str):
     print(f"\n{'='*50}")
@@ -160,10 +251,9 @@ async def demo_observe(session_id: str):
     print(f"Reasoning steps: {observation['summary']['reasoning_steps']}")
     print(f"Tool calls:      {observation['summary']['tool_calls']}")
     print(f"Errors:          {observation['summary']['errors']}")
-    print(f"Last reasoning:  {observation['summary']['last_reasoning']}")
 
     await db_writer.close()
-    return tracer_core.session_id
+
 
 # -------------------------------------------------
 # entry point
@@ -172,9 +262,11 @@ async def demo_observe(session_id: str):
 if __name__ == "__main__":
     async def main():
         session_id = await run_agent(
-            task="Search for information about AI agents, "
-                 "calculate 15 * 24, then save a note "
-                 "summarizing what you found.",
+            task=(
+                "Search for information about AI agents, "
+                "calculate 15 * 24, then save a note "
+                "summarizing what you found."
+            ),
             task_id="test_task_001"
         )
         await demo_observe(session_id)

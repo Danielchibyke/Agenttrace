@@ -1,28 +1,46 @@
 import time
-from typing import Any, Union
+import asyncio
+import logging
+from typing import Any
 from langchain_classic.callbacks.base import BaseCallbackHandler
 from tracer.adapters.base import BaseAdapter
 from tracer.node import Node, NodeType
 from tracer.core import TracerCore
+from tracer.streaming.token_buffer import TokenBuffer
+from tracer.streaming.micro_node import MicroNode
+
+logger = logging.getLogger(__name__)
+
 
 class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
     """
     Translates LangChain callback events into universal
-    Node objects and passes them to TracerCore.
+    Node objects and MicroNodes for token level capture.
     """
 
-    def __init__(self, tracer_core: TracerCore):
+    def __init__(
+        self,
+        tracer_core: TracerCore,
+        token_buffer: TokenBuffer = None,
+        on_micro_node: callable = None,
+    ):
         BaseCallbackHandler.__init__(self)
         BaseAdapter.__init__(self, tracer_core)
+        self.token_buffer = token_buffer
+        self.on_micro_node = on_micro_node
         self._active_reasoning_node: Node = None
         self._active_tool_node: Node = None
         self._reasoning_start_time: float = None
         self._tool_start_time: float = None
+        self._token_index: int = 0
 
     # --- reasoning events ---
 
-    def on_llm_start(self, serialized: dict, prompts: list, **kwargs):
+    def on_llm_start(
+        self, serialized: dict, prompts: list, **kwargs
+    ):
         self._reasoning_start_time = time.time()
+        self._token_index = 0
         prompt_text = prompts[0] if prompts else ""
         model_name = serialized.get("name", "unknown")
 
@@ -33,31 +51,76 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         )
         self._active_reasoning_node = self.core.record_node(node)
 
+    def on_llm_new_token(self, token: str, **kwargs):
+        """
+        Called for every token streamed from the LLM.
+        This is where micro nodes are created.
+        """
+        if not self._active_reasoning_node:
+            return
+        if not token:
+            return
+
+        micro_node = MicroNode(
+            parent_node_id=self._active_reasoning_node.node_id,
+            session_id=self.core.session_id,
+            task_id=self.core.task_id,
+            content=token,
+            index=self._token_index,
+            token_index=self._token_index,
+        )
+        self._token_index += 1
+
+        # push to token buffer
+        if self.token_buffer:
+            self.token_buffer.push(micro_node)
+
+        # fire callback if provided
+        if self.on_micro_node:
+            try:
+                asyncio.get_event_loop().call_soon(
+                    lambda: asyncio.ensure_future(
+                        self.on_micro_node(micro_node)
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Micro node callback error: {e}")
+
     def on_llm_end(self, response, **kwargs):
         if not self._active_reasoning_node:
             return
 
-        latency = (time.time() - self._reasoning_start_time) * 1000
+        latency = (
+            time.time() - self._reasoning_start_time
+        ) * 1000
         response_text = ""
         tokens_in = None
         tokens_out = None
 
         if response.generations:
-            response_text = response.generations[0][0].text
+            response_text = (
+                response.generations[0][0].text
+            )
 
         if response.llm_output:
-            usage = response.llm_output.get("token_usage", {})
+            usage = response.llm_output.get(
+                "token_usage", {}
+            )
             tokens_in = usage.get("prompt_tokens")
             tokens_out = usage.get("completion_tokens")
 
-        self._active_reasoning_node.response_text = response_text
+        self._active_reasoning_node.response_text = (
+            response_text
+        )
         self._active_reasoning_node.latency_ms = latency
         self._active_reasoning_node.tokens_in = tokens_in
         self._active_reasoning_node.tokens_out = tokens_out
 
-         # re-push updated node so database gets the response
         if self.core.write_queue:
-            self.core.write_queue.push(self._active_reasoning_node)
+            self.core.write_queue.push(
+                self._active_reasoning_node
+            )
+
         self.on_reasoning_end(
             self._active_reasoning_node,
             response_text
@@ -69,7 +132,9 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
 
     # --- tool events ---
 
-    def on_tool_start(self, serialized: dict, input_str: str, **kwargs):
+    def on_tool_start(
+        self, serialized: dict, input_str: str, **kwargs
+    ):
         self._tool_start_time = time.time()
         tool_name = serialized.get("name", "unknown")
 
@@ -83,10 +148,17 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         if not self._active_tool_node:
             return
 
-        latency = (time.time() - self._tool_start_time) * 1000
+        latency = (
+            time.time() - self._tool_start_time
+        ) * 1000
         self._active_tool_node.latency_ms = latency
         self._active_tool_node.raw_output = output
         self._active_tool_node.status = "success"
+
+        if self.core.write_queue:
+            self.core.write_queue.push(
+                self._active_tool_node
+            )
 
         response_node = self.core.create_tool_response_node(
             tool_name=self._active_tool_node.tool_name,
@@ -102,13 +174,19 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
 
     # --- base adapter implementation ---
 
-    def on_reasoning_start(self, prompt: str, **kwargs) -> Node:
+    def on_reasoning_start(
+        self, prompt: str, **kwargs
+    ) -> Node:
         pass
 
-    def on_reasoning_end(self, node: Node, response: str, **kwargs) -> Node:
+    def on_reasoning_end(
+        self, node: Node, response: str, **kwargs
+    ) -> Node:
         return node
 
-    def on_error(self, node: Node, error: Exception, **kwargs) -> Node:
+    def on_error(
+        self, node: Node, error: Exception, **kwargs
+    ) -> Node:
         node.status = "error"
         node.error_message = str(error)
         return node
