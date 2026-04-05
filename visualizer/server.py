@@ -116,85 +116,123 @@ async def get_session(session_id: str):
 
 @app.websocket("/ws/live/{session_id}")
 async def live_session(websocket: WebSocket, session_id: str):
-    """
-    WebSocket endpoint for live session visualization.
-    Streams new nodes to the frontend as they arrive.
-    """
     await websocket.accept()
     active_connections.append(websocket)
     logger.info(f"Client connected for session {session_id}")
 
     seen_node_ids = set()
-    session_vectors[session_id] = []
-    session_nodes[session_id] = []
 
     try:
         while True:
-            nodes = await db_writer.get_session_nodes(session_id)
+            # fetch ALL nodes for session
+            # regardless of whether they have embeddings
+            async with db_writer.pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT
+                        node_id, parent_id, node_type,
+                        step_number, tool_name, status,
+                        latency_ms, timestamp,
+                        embedding_vector::text as embedding_vector
+                    FROM nodes
+                    WHERE session_id = $1
+                    ORDER BY step_number
+                """, session_id)
+
+            all_nodes = [dict(r) for r in rows]
+
+            if not all_nodes:
+                await asyncio.sleep(0.5)
+                continue
+
             new_nodes = [
-                n for n in nodes
+                n for n in all_nodes
                 if n["node_id"] not in seen_node_ids
-                and n.get("embedding_vector") is not None
             ]
 
             if new_nodes:
-                vector_storage = VectorStorage(db_writer.pool)
-                trajectory = await vector_storage.get_session_trajectory(
-                    session_id
-                )
+                for n in new_nodes:
+                    seen_node_ids.add(n["node_id"])
 
-                vectors = []
-                meta = []
+                # separate embedded vs not yet embedded
+                embedded = [
+                    n for n in all_nodes
+                    if n.get("embedding_vector") is not None
+                ]
+                pending = [
+                    n for n in all_nodes
+                    if n.get("embedding_vector") is None
+                ]
 
-                for node in trajectory:
-                    vec_str = node.get("embedding_vector")
-                    if not vec_str:
-                        continue
-                    vec = _parse_vector(vec_str)
-                    if vec is None:
-                        continue
-                    vectors.append(vec)
-                    meta.append({
+                coords = []
+
+                # project embedded nodes properly
+                if embedded:
+                    vectors = []
+                    meta = []
+                    for node in embedded:
+                        vec = _parse_vector(node["embedding_vector"])
+                        if vec is None:
+                            continue
+                        vectors.append(vec)
+                        meta.append(node)
+
+                    if vectors:
+                        projected = projector.project(
+                            vectors,
+                            [f"{m['node_type']}_{m['step_number']}"
+                             for m in meta]
+                        )
+                        for i, coord in enumerate(projected):
+                            if i < len(meta):
+                                coord.update({
+                                    "node_id": meta[i]["node_id"],
+                                    "node_type": meta[i]["node_type"],
+                                    "step_number": meta[i]["step_number"],
+                                    "tool_name": meta[i].get("tool_name"),
+                                    "status": meta[i].get("status"),
+                                    "latency_ms": meta[i].get("latency_ms"),
+                                    "has_embedding": True,
+                                })
+                        coords.extend(projected)
+
+                # add pending nodes at placeholder positions
+                for node in pending:
+                    coords.append({
                         "node_id": node["node_id"],
                         "node_type": node["node_type"],
                         "step_number": node["step_number"],
                         "tool_name": node.get("tool_name"),
                         "status": node.get("status"),
                         "latency_ms": node.get("latency_ms"),
+                        "has_embedding": False,
+                        # placeholder position near origin
+                        # will update when embedding arrives
+                        "x": 0.0,
+                        "y": float(node["step_number"]) * 0.1,
+                        "z": 0.0,
                     })
 
-                if vectors:
-                    coords = projector.project(vectors, [
-                        f"{m['node_type']}_{m['step_number']}"
-                        for m in meta
-                    ])
+                await websocket.send_json({
+                    "event": "update",
+                    "session_id": session_id,
+                    "nodes": coords,
+                    "latest_step": max(
+                        n["step_number"] for n in all_nodes
+                    ),
+                    "total_nodes": len(all_nodes),
+                    "embedded_count": len(embedded),
+                    "pending_count": len(pending),
+                })
 
-                    for i, coord in enumerate(coords):
-                        if i < len(meta):
-                            coord.update(meta[i])
-
-                    for node in new_nodes:
-                        seen_node_ids.add(node["node_id"])
-
-                    await websocket.send_json({
-                        "event": "update",
-                        "session_id": session_id,
-                        "nodes": coords,
-                        "latest_step": max(
-                            m["step_number"] for m in meta
-                        )
-                    })
-
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
 
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
-        logger.info(f"Client disconnected from session {session_id}")
+        if websocket in active_connections:
+            active_connections.remove(websocket)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         if websocket in active_connections:
             active_connections.remove(websocket)
-
 
 async def push_node_to_clients(session_id: str, node_data: dict):
     """

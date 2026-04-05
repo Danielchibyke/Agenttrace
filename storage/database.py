@@ -45,7 +45,27 @@ CREATE INDEX IF NOT EXISTS idx_nodes_parent
 CREATE INDEX IF NOT EXISTS idx_nodes_type 
     ON nodes(node_type);
 """
-
+CREATE_MICRO_NODES_TABLE = """
+CREATE TABLE IF NOT EXISTS micro_nodes (
+    micro_id TEXT PRIMARY KEY,
+    parent_node_id TEXT REFERENCES nodes(node_id),
+    session_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    content TEXT,
+    index INTEGER,
+    token_index INTEGER,
+    timestamp TIMESTAMPTZ,
+    logprob FLOAT,
+    tier INTEGER DEFAULT 1,
+    embedding_vector vector(768)
+);
+CREATE INDEX IF NOT EXISTS idx_micro_session
+    ON micro_nodes(session_id);
+CREATE INDEX IF NOT EXISTS idx_micro_parent
+    ON micro_nodes(parent_node_id);
+CREATE INDEX IF NOT EXISTS idx_micro_tier
+    ON micro_nodes(tier);
+"""
 class DatabaseWriter:
     def __init__(self):
         self.db_url = os.getenv("DATABASE_URL")
@@ -63,6 +83,7 @@ class DatabaseWriter:
         async with self.pool.acquire() as conn:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
             await conn.execute(CREATE_NODES_TABLE)
+            await conn.execute(CREATE_MICRO_NODES_TABLE)
             await conn.execute(CREATE_INDEXES)
 
     async def write_nodes(self, nodes: list[Node]):
@@ -134,3 +155,84 @@ class DatabaseWriter:
     async def close(self):
         if self.pool:
             await self.pool.close()
+            
+    async def write_micro_nodes(
+            self,
+            micro_nodes: list
+        ) -> None:
+            async with self.pool.acquire() as conn:
+                await conn.executemany(
+                    """
+                    INSERT INTO micro_nodes (
+                        micro_id, parent_node_id, session_id,
+                        task_id, content, index, token_index,
+                        timestamp, logprob, tier
+                    ) VALUES (
+                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
+                    )
+                    ON CONFLICT (micro_id) DO NOTHING
+                    """,
+                    [
+                        (
+                            m.micro_id,
+                            m.parent_node_id,
+                            m.session_id,
+                            m.task_id,
+                            m.content,
+                            m.index,
+                            m.token_index,
+                            m.timestamp,
+                            m.logprob,
+                            1,
+                        )
+                        for m in micro_nodes
+                    ]
+                )
+
+    async def update_micro_node_embedding(
+            self,
+            micro_id: str,
+            embedding: list[float]
+        ) -> None:
+            vector_str = (
+                "[" + ",".join(str(x) for x in embedding) + "]"
+            )
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE micro_nodes
+                    SET embedding_vector = $1::vector
+                    WHERE micro_id = $2
+                    """,
+                    vector_str,
+                    micro_id
+                )
+
+    async def get_session_micro_trajectory(
+            self,
+            session_id: str,
+            parent_node_id: str = None
+        ) -> list[dict]:
+            query = """
+                SELECT
+                    micro_id, parent_node_id, content,
+                    index, token_index, timestamp, logprob,
+                    embedding_vector::text as embedding_vector
+                FROM micro_nodes
+                WHERE session_id = $1
+                AND embedding_vector IS NOT NULL
+                {filter}
+                ORDER BY token_index
+            """
+            if parent_node_id:
+                query = query.format(
+                    filter="AND parent_node_id = $2"
+                )
+                params = [session_id, parent_node_id]
+            else:
+                query = query.format(filter="")
+                params = [session_id]
+
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query, *params)
+                return [dict(row) for row in rows]           

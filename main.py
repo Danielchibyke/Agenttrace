@@ -108,17 +108,33 @@ async def run_agent(task: str, task_id: str = None):
     # stop queue and flush remaining nodes
     await write_queue.stop()
 
-    # second pass — compute embeddings
+    # wait briefly to ensure all nodes are flushed
+    await asyncio.sleep(1)
+   # compute embeddings concurrently as agent runs
+    # embed nodes one by one as soon as they're in the db
     print("\nComputing embeddings...")
     encoder = EmbeddingEncoder()
-    all_nodes = tracer_core.get_tree().get_all_nodes()
-    embeddings = await encoder.encode_batch(all_nodes)
-
     vector_storage = VectorStorage(db_writer.pool)
-    await vector_storage.store_embeddings_batch(embeddings)
-    print(f"Stored {len(embeddings)} embeddings.")
+    all_nodes = tracer_core.get_tree().get_all_nodes()
 
-    # print tree summary
+    for node in all_nodes:
+        try:
+            vector = await encoder.encode_node(node)
+            if vector:
+                node.embedding_vector = vector
+                await vector_storage.store_embedding(
+                    node.node_id, vector
+                )
+                print(f"  Embedded: {node.node_type.value} "
+                      f"step {node.step_number}")
+        except Exception as e:
+            print(f"  Failed to embed node {node.node_id}: {e}")
+
+    print(f"Done. {len(all_nodes)} nodes embedded.")
+
+    # final flush — ensures last node is visible
+    await asyncio.sleep(0.5)
+
     summary = tracer_core.get_summary()
     print(f"\nEXECUTION SUMMARY:")
     print(f"  Session ID:      {tracer_core.session_id}")
@@ -147,7 +163,7 @@ async def demo_observe(session_id: str):
     print(f"Last reasoning:  {observation['summary']['last_reasoning']}")
 
     await db_writer.close()
-
+    return tracer_core.session_id
 
 # -------------------------------------------------
 # entry point
