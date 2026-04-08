@@ -22,6 +22,9 @@ from storage.database import DatabaseWriter
 from storage.vector import VectorStorage
 from embeddings.encoder import EmbeddingEncoder
 from replay.replay import ReplayEngine
+from intelligence.pattern_library import PatternLibrary
+from intelligence.drift_detector import DriftDetector
+from intelligence.behavioral_signals import BehavioralSignalEngine
 
 load_dotenv()
 logging.basicConfig(level=logging.WARNING)
@@ -114,6 +117,16 @@ async def run_agent(task: str, task_id: str = None):
     db_writer = DatabaseWriter()
     await db_writer.connect()
     print("Database connected.")
+    
+    # setup pattern library
+    pattern_library = PatternLibrary(db_writer)
+    await pattern_library.setup()
+
+    # setup drift detector
+    drift_detector = DriftDetector(
+        pattern_library=pattern_library,
+        task_type="general",
+    )
 
     # setup encoder
     encoder = EmbeddingEncoder()
@@ -260,6 +273,78 @@ async def run_agent(task: str, task_id: str = None):
 
     await db_writer.close()
     return tracer_core.session_id
+
+# store pattern from this session
+# auto ingest pattern — runs in background
+    goal_text = (
+        "Search for information about AI agents, "
+        "calculate 15 * 24, then save a note "
+        "summarizing what you found."
+    )
+
+    # embed the goal for task classification
+    goal_vec = await encoder._embed(goal_text)
+
+    node_embeddings = [
+        n.embedding_vector
+        for n in tracer_core.get_tree().get_all_nodes()
+        if n.embedding_vector
+    ]
+
+    health = drift_detector.get_trajectory_summary()
+
+    ingest_result = await pattern_library.ingest(
+        session_id=tracer_core.session_id,
+        goal_text=goal_text,
+        goal_embedding=goal_vec,
+        node_embeddings=node_embeddings,
+        behavioral_health=health["behavioral_health"],
+        error_count=sum(
+            1 for n in
+            tracer_core.get_tree().get_all_nodes()
+            if n.status == "error"
+        ),
+        total_steps=summary["total_nodes"],
+        reasoning_hops=summary["reasoning_hops"],
+    )
+
+    stats = await pattern_library.get_stats()
+
+    print(f"\nHEALTH SUMMARY:")
+    print(
+        f"  Status:        "
+        f"{health['behavioral_health']['status']}"
+    )
+    print(
+        f"  Total alerts:  "
+        f"{health['total_alerts']}"
+    )
+    print(
+        f"  Pattern:       "
+        f"{ingest_result['status']} — "
+        f"{ingest_result.get('outcome', 'n/a')}"
+    )
+    print(
+        f"  Task type:     "
+        f"{ingest_result.get('task_type', 'n/a')}"
+    )
+    print(f"\nLIBRARY STATS:")
+    print(
+        f"  Total patterns:  "
+        f"{stats['total_patterns']}"
+    )
+    print(
+        f"  Success:         "
+        f"{stats['success_patterns']}"
+    )
+    print(
+        f"  Failure:         "
+        f"{stats['failure_patterns']}"
+    )
+    print(
+        f"  Task clusters:   "
+        f"{stats['task_clusters']}"
+    )
 
 
 # -------------------------------------------------

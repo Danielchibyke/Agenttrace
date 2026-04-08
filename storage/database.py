@@ -31,11 +31,11 @@ CREATE TABLE IF NOT EXISTS nodes (
     memory_snapshot JSONB,
     agent_state_snapshot JSONB,
     tool_config_snapshot JSONB,
-    embedding_vector vector(896)
+    embedding_vector vector(896),
     progress_score FLOAT,
     error_flag BOOLEAN DEFAULT FALSE,
     repetition_score FLOAT,
-    goal_embedding vector(896),
+    goal_embedding vector(896)
 );
 """
 
