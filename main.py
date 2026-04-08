@@ -152,11 +152,11 @@ async def run_agent(task: str, task_id: str = None):
 
     # setup llm with streaming enabled
     llm = ChatOllama(
-        model="llama3.2",
+        model="qwen2.5:0.5b",
         temperature=0,
         streaming=True,
+        callbacks=[adapter],
     )
-
     # setup prompt
     prompt = ChatPromptTemplate.from_messages([
         (
@@ -178,7 +178,8 @@ async def run_agent(task: str, task_id: str = None):
         tools=TOOLS,
         callbacks=[adapter],
         verbose=False,
-        return_intermediate_steps=True
+        return_intermediate_steps=True,
+        handle_parsing_errors=True,
     )
 
     # run agent
@@ -190,12 +191,41 @@ async def run_agent(task: str, task_id: str = None):
 
     print(f"\nAGENT OUTPUT:\n{result['output']}\n")
 
+    # stop write queue first
+    await write_queue.stop()
+
     # stop token buffer — flushes remaining tokens
     await token_buffer.stop()
 
-    # stop write queue — flushes remaining nodes
-    await write_queue.stop()
+    # wait for all batch embeddings to complete
+    await asyncio.sleep(2)
 
+    # embed any remaining micro nodes that missed batches
+    print("Embedding remaining micro nodes...")
+    remaining = [
+        m for m in token_buffer.get_all_micro_nodes()
+        if not m.embedding_complete
+    ]
+
+    if remaining:
+        texts = [m.content for m in remaining]
+        try:
+            loop = asyncio.get_event_loop()
+            vectors = await loop.run_in_executor(
+                None,
+                lambda: encoder.embeddings.embed_documents(texts)
+            )
+            for micro_node, vector in zip(remaining, vectors):
+                micro_node.embedding_vector = vector
+                micro_node.embedding_complete = True
+            await db_writer.write_micro_nodes(remaining)
+            for micro_node, vector in zip(remaining, vectors):
+                await db_writer.update_micro_node_embedding(
+                    micro_node.micro_id, vector
+                )
+            print(f"Embedded {len(remaining)} remaining micro nodes.")
+        except Exception as e:
+            print(f"Remaining embedding failed: {e}")
     # embed parent nodes
     print("Embedding parent nodes...")
     vector_storage = VectorStorage(db_writer.pool)
@@ -247,10 +277,16 @@ async def demo_observe(session_id: str):
     replay = ReplayEngine(db_writer)
     observation = await replay.observe(session_id)
 
-    print(f"Total steps:     {observation['summary']['total_steps']}")
-    print(f"Reasoning steps: {observation['summary']['reasoning_steps']}")
-    print(f"Tool calls:      {observation['summary']['tool_calls']}")
-    print(f"Errors:          {observation['summary']['errors']}")
+    if "error" in observation:
+        print(f"Observe error: {observation['error']}")
+        await db_writer.close()
+        return
+
+    summary = observation.get("summary", {})
+    print(f"Total steps:     {summary.get('total_steps', 0)}")
+    print(f"Reasoning steps: {summary.get('reasoning_steps', 0)}")
+    print(f"Tool calls:      {summary.get('tool_calls', 0)}")
+    print(f"Errors:          {summary.get('errors', 0)}")
 
     await db_writer.close()
 

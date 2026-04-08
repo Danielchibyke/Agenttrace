@@ -13,7 +13,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "qwen2.5:0.5b"
-EMBEDDING_DIM = 3071
+EMBEDDING_DIM = 896
 
 class EmbeddingEncoder:
     """

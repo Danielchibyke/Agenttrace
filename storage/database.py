@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS nodes (
     agent_state_snapshot JSONB,
     tool_config_snapshot JSONB,
     embedding_vector vector(896)
+    progress_score FLOAT,
+    error_flag BOOLEAN DEFAULT FALSE,
+    repetition_score FLOAT,
+    goal_embedding vector(896),
 );
 """
 
@@ -57,7 +61,7 @@ CREATE TABLE IF NOT EXISTS micro_nodes (
     timestamp TIMESTAMPTZ,
     logprob FLOAT,
     tier INTEGER DEFAULT 1,
-    embedding_vector vector(768)
+    embedding_vector vector(896)
 );
 CREATE INDEX IF NOT EXISTS idx_micro_session
     ON micro_nodes(session_id);

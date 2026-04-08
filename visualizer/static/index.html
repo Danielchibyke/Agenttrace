@@ -57,6 +57,7 @@
     <button class="btn" onclick="loadSession()">Load completed session</button>
     <button class="btn" id="live-btn" onclick="connectLive()">Connect live session</button>
     <button class="btn" onclick="loadLatestSession()">Load latest session</button>
+    <button class="btn" onclick="loadMicroSession()">Load micro trajectory</button>
     <button class="btn" onclick="resetView()">Reset view</button>
   </div>
 
@@ -177,6 +178,7 @@ function clearScene() {
   document.getElementById("status").style.display = "none";
 }
 
+
 function renderNodes(nodes) {
   clearScene();
   currentNodes = nodes;
@@ -244,6 +246,105 @@ function updateStats(nodes) {
   document.getElementById("stat-step").textContent = maxStep;
 }
 
+function renderNodesCombined(nodes) {
+  clearScene();
+  currentNodes = nodes;
+
+  const sorted = [...nodes].sort(
+    (a, b) => a.step_number - b.step_number
+  );
+
+  const microPoints = [];
+  const parentPoints = [];
+
+  sorted.forEach((node) => {
+    const isParent = node.is_parent;
+    const isMicro = node.node_type === "micro";
+    const isHead = (
+      node === sorted[sorted.length - 1]
+    );
+
+    // size based on node type
+    const size = isParent ? 0.1 : 0.03;
+    const color = isParent
+      ? getNodeColor(node.node_type, node.status)
+      : 0x334466;
+    const emissiveIntensity = isParent ? 0.4 : 0.1;
+
+    const geo = new THREE.SphereGeometry(size, 8, 8);
+    const mat = new THREE.MeshPhongMaterial({
+      color,
+      emissive: color,
+      emissiveIntensity,
+      transparent: true,
+      opacity: isParent ? 0.9 : 0.5,
+    });
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(
+      node.x * 3, node.y * 3, node.z * 3
+    );
+    mesh.userData = node;
+    scene.add(mesh);
+    nodeMeshes.push(mesh);
+
+    if (isMicro) {
+      microPoints.push(
+        new THREE.Vector3(node.x * 3, node.y * 3, node.z * 3)
+      );
+    } else {
+      parentPoints.push(
+        new THREE.Vector3(node.x * 3, node.y * 3, node.z * 3)
+      );
+      trailPoints.push(
+        new THREE.Vector3(node.x * 3, node.y * 3, node.z * 3)
+      );
+    }
+  });
+
+  // micro node trail — thin dim line
+  if (microPoints.length > 1) {
+    const geo = new THREE.BufferGeometry()
+      .setFromPoints(microPoints);
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x223344,
+      linewidth: 1,
+    });
+    const line = new THREE.Line(geo, mat);
+    scene.add(line);
+  }
+
+  // parent node trail — brighter line
+  if (parentPoints.length > 1) {
+    const geo = new THREE.BufferGeometry()
+      .setFromPoints(parentPoints);
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x334455,
+      linewidth: 1,
+    });
+    trailLine = new THREE.Line(geo, mat);
+    scene.add(trailLine);
+  }
+
+  // head on last node
+  const head = sorted[sorted.length - 1];
+  if (head) {
+    const headGeo = new THREE.SphereGeometry(0.14, 24, 24);
+    const headMat = new THREE.MeshPhongMaterial({
+      color: 0xffffff,
+      emissive: 0xffffff,
+      emissiveIntensity: 0.9,
+    });
+    headMesh = new THREE.Mesh(headGeo, headMat);
+    headMesh.position.set(
+      head.x * 3, head.y * 3, head.z * 3
+    );
+    scene.add(headMesh);
+  }
+
+  updateStats(sorted.filter(n => n.is_parent));
+}
+
 // ─── HOVER TOOLTIP ─────────────────────────────────────────
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
@@ -293,6 +394,22 @@ async function loadLatestSession() {
   renderNodes(data.nodes);
 }
 
+async function loadMicroSession() {
+  const id = document.getElementById("session-input").value.trim();
+  if (!id) {
+    await loadLatestSession();
+    return;
+  }
+  const res = await fetch(`/session/${id}/combined`);
+  const data = await res.json();
+  if (data.error) {
+    alert(data.error);
+    return;
+  }
+  renderNodesCombined(data.nodes);
+  document.getElementById("status").style.display = "none";
+}
+
 let ws = null;
 
 function connectLive() {
@@ -334,7 +451,7 @@ function animate() {
 
   // gentle auto-rotate when not dragging
   if (!isDragging) {
-    spherical.theta += 0.001;
+    spherical.theta += 0.0001;
     updateCamera();
   }
 

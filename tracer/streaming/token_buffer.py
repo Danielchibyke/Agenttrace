@@ -22,27 +22,25 @@ class TokenBuffer:
         session_id: str,
         batch_size: int = 20,
         batch_interval_ms: int = 100,
-        on_visualizer_dispatch: Optional[Callable] = None,
-        on_batch_ready: Optional[Callable] = None,
+        on_visualizer_dispatch=None,
+        on_batch_ready=None,
     ):
         self.session_id = session_id
         self.batch_size = batch_size
         self.batch_interval = batch_interval_ms / 1000
-
-        # callbacks
         self.on_visualizer_dispatch = on_visualizer_dispatch
         self.on_batch_ready = on_batch_ready
 
-        # internal state
         self._buffer: deque = deque()
         self._pending_batch: list[MicroNode] = []
         self._all_micro_nodes: list[MicroNode] = []
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task = None
         self._lock = asyncio.Lock()
-
+        self._loop = None
     async def start(self):
         self._running = True
+        self._loop = asyncio.get_event_loop()
         self._task = asyncio.create_task(self._batch_loop())
         logger.info("TokenBuffer started.")
 
@@ -60,18 +58,32 @@ class TokenBuffer:
     def push(self, micro_node: MicroNode):
         """
         Called for every token captured.
-        Non blocking. Instantly dispatches to Track A.
-        Queues for Track B.
+        Non blocking. Thread safe.
+        Works from both sync and async contexts.
         """
-        self._buffer.append(micro_node)
         self._all_micro_nodes.append(micro_node)
 
-        # Track A — dispatch to visualizer immediately
+        try:
+            loop = self._loop
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._async_push(micro_node), loop
+                )
+            else:
+                self._pending_batch.append(micro_node)
+        except Exception as e:
+            logger.error(f"Push failed: {e}")
+            self._pending_batch.append(micro_node)
+
+    async def _async_push(self, micro_node: MicroNode):
+        """Async push — runs in the main event loop."""
+        async with self._lock:
+            self._buffer.append(micro_node)
+
         if self.on_visualizer_dispatch:
             try:
-                asyncio.get_event_loop().call_soon(
-                    self._dispatch_visualizer, micro_node
-                )
+                await self.on_visualizer_dispatch(micro_node)
+                micro_node.dispatched_to_visualizer = True
             except Exception as e:
                 logger.error(f"Visualizer dispatch failed: {e}")
 

@@ -44,6 +44,12 @@ class Node:
 
     # HD space field
     embedding_vector: Optional[list] = None
+    
+    # behavioral signal fields
+    progress_score: Optional[float] = None
+    error_flag: bool = False
+    repetition_score: Optional[float] = None
+    goal_embedding: Optional[list] = None
 
     def to_dict(self) -> dict:
         return {

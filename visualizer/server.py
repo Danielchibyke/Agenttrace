@@ -112,6 +112,146 @@ async def get_session(session_id: str):
         "node_count": len(coords),
         "nodes": coords
     }
+    
+@app.get("/session/{session_id}/micro")
+async def get_session_micro(
+    session_id: str,
+    parent_node_id: str = None
+):
+    """Get micro node trajectory for a session."""
+    trajectory = await db_writer.get_session_micro_trajectory(
+        session_id, parent_node_id
+    )
+
+    if not trajectory:
+        return {"error": "No micro nodes found"}
+
+    vectors = []
+    meta = []
+
+    for node in trajectory:
+        vec_str = node.get("embedding_vector")
+        if not vec_str:
+            continue
+        vec = _parse_vector(vec_str)
+        if vec is None:
+            continue
+        vectors.append(vec)
+        meta.append({
+            "micro_id": node["micro_id"],
+            "parent_node_id": node["parent_node_id"],
+            "content": node.get("content", ""),
+            "token_index": node.get("token_index", 0),
+            "timestamp": str(node.get("timestamp")),
+        })
+
+    if not vectors:
+        return {"error": "No embedded micro nodes found"}
+
+    coords = projector.project(
+        vectors,
+        [f"token_{m['token_index']}" for m in meta]
+    )
+
+    for i, coord in enumerate(coords):
+        if i < len(meta):
+            coord.update(meta[i])
+            coord["node_type"] = "micro"
+
+    return {
+        "session_id": session_id,
+        "micro_count": len(coords),
+        "nodes": coords
+    }
+@app.get("/session/{session_id}/combined")
+async def get_session_combined(session_id: str):
+    """
+    Returns both parent nodes and micro nodes together.
+    Parent nodes are landmarks.
+    Micro nodes are the detailed trajectory.
+    """
+    # get parent nodes
+    parent_nodes = await db_writer.get_session_nodes(
+        session_id
+    )
+
+    # get micro nodes
+    micro_trajectory = (
+        await db_writer.get_session_micro_trajectory(
+            session_id
+        )
+    )
+
+    if not parent_nodes and not micro_trajectory:
+        return {"error": "Session not found"}
+
+    all_vectors = []
+    all_meta = []
+
+    # add parent nodes
+    for node in parent_nodes:
+        vec_str = node.get("embedding_vector")
+        if not vec_str:
+            continue
+        vec = _parse_vector(
+            vec_str if isinstance(vec_str, str)
+            else str(vec_str)
+        )
+        if vec is None:
+            continue
+        all_vectors.append(vec)
+        all_meta.append({
+            "node_id": node["node_id"],
+            "node_type": node["node_type"],
+            "step_number": node["step_number"],
+            "tool_name": node.get("tool_name"),
+            "status": node.get("status"),
+            "latency_ms": node.get("latency_ms"),
+            "is_parent": True,
+            "size": "large",
+        })
+
+    # add micro nodes
+    for node in micro_trajectory:
+        vec_str = node.get("embedding_vector")
+        if not vec_str:
+            continue
+        vec = _parse_vector(vec_str)
+        if vec is None:
+            continue
+        all_vectors.append(vec)
+        all_meta.append({
+            "node_id": node["micro_id"],
+            "node_type": "micro",
+            "step_number": node.get("token_index", 0),
+            "content": node.get("content", ""),
+            "parent_node_id": node.get("parent_node_id"),
+            "is_parent": False,
+            "size": "small",
+        })
+
+    if not all_vectors:
+        return {"error": "No embedded nodes found"}
+
+    coords = projector.project(
+        all_vectors,
+        [
+            f"{m['node_type']}_{m['step_number']}"
+            for m in all_meta
+        ]
+    )
+
+    for i, coord in enumerate(coords):
+        if i < len(all_meta):
+            coord.update(all_meta[i])
+
+    return {
+        "session_id": session_id,
+        "total_count": len(coords),
+        "parent_count": len(parent_nodes),
+        "micro_count": len(micro_trajectory),
+        "nodes": coords,
+    }    
 
 
 @app.websocket("/ws/live/{session_id}")

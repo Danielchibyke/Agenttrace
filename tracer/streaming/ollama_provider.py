@@ -21,7 +21,7 @@ class OllamaStreamingProvider(BaseStreamingProvider):
         parent_node_id: str,
         session_id: str,
         task_id: str,
-        model: str = "llama3.2",
+        model: str = "qwen2.5:0.5b",
         temperature: float = 0,
     ):
         super().__init__(

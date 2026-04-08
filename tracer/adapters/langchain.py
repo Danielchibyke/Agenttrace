@@ -52,10 +52,6 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         self._active_reasoning_node = self.core.record_node(node)
 
     def on_llm_new_token(self, token: str, **kwargs):
-        """
-        Called for every token streamed from the LLM.
-        This is where micro nodes are created.
-        """
         if not self._active_reasoning_node:
             return
         if not token:
@@ -71,21 +67,9 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         )
         self._token_index += 1
 
-        # push to token buffer
+        # push to token buffer — thread safe
         if self.token_buffer:
             self.token_buffer.push(micro_node)
-
-        # fire callback if provided
-        if self.on_micro_node:
-            try:
-                asyncio.get_event_loop().call_soon(
-                    lambda: asyncio.ensure_future(
-                        self.on_micro_node(micro_node)
-                    )
-                )
-            except Exception as e:
-                logger.error(f"Micro node callback error: {e}")
-
     def on_llm_end(self, response, **kwargs):
         if not self._active_reasoning_node:
             return
@@ -133,16 +117,27 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
     # --- tool events ---
 
     def on_tool_start(
-        self, serialized: dict, input_str: str, **kwargs
+        self,
+        serialized: dict,
+        input_str: str,
+        **kwargs
     ):
         self._tool_start_time = time.time()
-        tool_name = serialized.get("name", "unknown")
+        tool_name = (
+            serialized.get("name") or
+            serialized.get("id", ["unknown"])[-1] or
+            kwargs.get("name", "unknown")
+        )
+        print(f"[TRACER] Tool started: {tool_name}")
 
         node = self.core.create_tool_call_node(
             tool_name=tool_name,
             input_params={"input": input_str},
         )
         self._active_tool_node = self.core.record_node(node)
+
+        if self.core.write_queue:
+            self.core.write_queue.push(self._active_tool_node)
 
     def on_tool_end(self, output: str, **kwargs):
         if not self._active_tool_node:
