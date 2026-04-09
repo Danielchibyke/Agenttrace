@@ -77,4 +77,9 @@ class Node:
             "agent_state_snapshot": self.agent_state_snapshot,
             "tool_config_snapshot": self.tool_config_snapshot,
             "embedding_vector": self.embedding_vector,
+            "progress_score": self.progress_score,
+            "error_flag": self.error_flag,
+            "repetition_score": self.repetition_score,
+            "goal_embedding": self.goal_embedding,
+            
         }

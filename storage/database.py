@@ -31,11 +31,11 @@ CREATE TABLE IF NOT EXISTS nodes (
     memory_snapshot JSONB,
     agent_state_snapshot JSONB,
     tool_config_snapshot JSONB,
-    embedding_vector vector(896),
+    embedding_vector vector(768),
     progress_score FLOAT,
     error_flag BOOLEAN DEFAULT FALSE,
     repetition_score FLOAT,
-    goal_embedding vector(896)
+    goal_embedding vector(768)
 );
 """
 
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS micro_nodes (
     timestamp TIMESTAMPTZ,
     logprob FLOAT,
     tier INTEGER DEFAULT 1,
-    embedding_vector vector(896)
+    embedding_vector vector(768)
 );
 CREATE INDEX IF NOT EXISTS idx_micro_session
     ON micro_nodes(session_id);
@@ -138,6 +138,122 @@ class DatabaseWriter:
                     )
                     for n in nodes
                 ]
+            )
+
+    async def upsert_node(self, node) -> None:
+        """
+        Insert or update a node.
+        Called immediately when node starts — even if incomplete.
+        Called again as details arrive.
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO nodes (
+                    node_id, parent_id, session_id,
+                    task_id, step_number, node_type,
+                    timestamp, latency_ms, prompt_text,
+                    response_text, model_name,
+                    tokens_in, tokens_out, tool_name,
+                    input_params, raw_output, status,
+                    error_message, conversation_snapshot,
+                    system_prompt_snapshot
+                ) VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+                    $11,$12,$13,$14,$15,$16,$17,$18,$19,$20
+                )
+                ON CONFLICT (node_id) DO UPDATE SET
+                    latency_ms = COALESCE(
+                        EXCLUDED.latency_ms,
+                        nodes.latency_ms
+                    ),
+                    response_text = COALESCE(
+                        EXCLUDED.response_text,
+                        nodes.response_text
+                    ),
+                    raw_output = COALESCE(
+                        EXCLUDED.raw_output,
+                        nodes.raw_output
+                    ),
+                    status = COALESCE(
+                        EXCLUDED.status,
+                        nodes.status
+                    ),
+                    tokens_in = COALESCE(
+                        EXCLUDED.tokens_in,
+                        nodes.tokens_in
+                    ),
+                    tokens_out = COALESCE(
+                        EXCLUDED.tokens_out,
+                        nodes.tokens_out
+                    ),
+                    error_message = COALESCE(
+                        EXCLUDED.error_message,
+                        nodes.error_message
+                    ),
+                    tool_name = COALESCE(
+                        EXCLUDED.tool_name,
+                        nodes.tool_name
+                    ),
+                    input_params = COALESCE(
+                        EXCLUDED.input_params,
+                        nodes.input_params
+                    )
+                """,
+                node.node_id,
+                node.parent_id,
+                node.session_id,
+                node.task_id,
+                node.step_number,
+                node.node_type.value,
+                node.timestamp,
+                node.latency_ms,
+                node.prompt_text,
+                node.response_text,
+                node.model_name,
+                node.tokens_in,
+                node.tokens_out,
+                node.tool_name,
+                __import__('json').dumps(node.input_params)
+                if node.input_params else None,
+                str(node.raw_output)
+                if node.raw_output else None,
+                node.status,
+                node.error_message,
+                __import__('json').dumps(
+                    node.conversation_snapshot
+                )
+                if node.conversation_snapshot else None,
+                node.system_prompt_snapshot,
+            )
+
+    async def upsert_micro_node(self, micro_node) -> None:
+        """
+        Insert or update a micro node skeleton immediately.
+        Embedding arrives later.
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO micro_nodes (
+                    micro_id, parent_node_id, session_id,
+                    task_id, content, index,
+                    token_index, timestamp, logprob, tier
+                ) VALUES (
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
+                )
+                ON CONFLICT (micro_id) DO NOTHING
+                """,
+                micro_node.micro_id,
+                micro_node.parent_node_id,
+                micro_node.session_id,
+                micro_node.task_id,
+                micro_node.content,
+                micro_node.index,
+                micro_node.token_index,
+                micro_node.timestamp,
+                micro_node.logprob,
+                1,
             )
 
     async def get_session_nodes(self, session_id: str) -> list[dict]:

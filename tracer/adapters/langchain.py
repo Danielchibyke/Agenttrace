@@ -1,7 +1,6 @@
 import time
 import asyncio
 import logging
-from typing import Any
 from langchain_classic.callbacks.base import BaseCallbackHandler
 from tracer.adapters.base import BaseAdapter
 from tracer.node import Node, NodeType
@@ -13,27 +12,32 @@ logger = logging.getLogger(__name__)
 
 
 class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
-    """
-    Translates LangChain callback events into universal
-    Node objects and MicroNodes for token level capture.
-    """
 
     def __init__(
         self,
         tracer_core: TracerCore,
         token_buffer: TokenBuffer = None,
-        on_micro_node: callable = None,
+        embedding_worker=None,
     ):
         BaseCallbackHandler.__init__(self)
         BaseAdapter.__init__(self, tracer_core)
         self.token_buffer = token_buffer
-        self.on_micro_node = on_micro_node
+        self.embedding_worker = embedding_worker
         self._active_reasoning_node: Node = None
         self._active_tool_node: Node = None
         self._reasoning_start_time: float = None
         self._tool_start_time: float = None
         self._token_index: int = 0
 
+    def _upsert_now(self, node: Node):
+        """
+        Write node to database immediately.
+        Also queue for immediate background embedding.
+        """
+        if self.core.write_queue:
+            self.core.write_queue.push(node)
+        if self.embedding_worker:
+            self.embedding_worker.queue_node(node)
     # --- reasoning events ---
 
     def on_llm_start(
@@ -49,7 +53,12 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
             model_name=model_name,
             conversation_snapshot=prompts,
         )
-        self._active_reasoning_node = self.core.record_node(node)
+        self._active_reasoning_node = (
+            self.core.record_node(node)
+        )
+
+        # write skeleton immediately — no details yet
+        self._upsert_now(self._active_reasoning_node)
 
     def on_llm_new_token(self, token: str, **kwargs):
         if not self._active_reasoning_node:
@@ -58,7 +67,9 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
             return
 
         micro_node = MicroNode(
-            parent_node_id=self._active_reasoning_node.node_id,
+            parent_node_id=(
+                self._active_reasoning_node.node_id
+            ),
             session_id=self.core.session_id,
             task_id=self.core.task_id,
             content=token,
@@ -67,9 +78,12 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         )
         self._token_index += 1
 
-        # push to token buffer — thread safe
         if self.token_buffer:
             self.token_buffer.push(micro_node)
+        # queue for immediate embedding
+        if self.embedding_worker:
+            self.embedding_worker.queue_micro(micro_node)    
+
     def on_llm_end(self, response, **kwargs):
         if not self._active_reasoning_node:
             return
@@ -85,7 +99,6 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
             response_text = (
                 response.generations[0][0].text
             )
-
         if response.llm_output:
             usage = response.llm_output.get(
                 "token_usage", {}
@@ -93,17 +106,17 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
             tokens_in = usage.get("prompt_tokens")
             tokens_out = usage.get("completion_tokens")
 
+        # update node with completed details
         self._active_reasoning_node.response_text = (
             response_text
         )
         self._active_reasoning_node.latency_ms = latency
         self._active_reasoning_node.tokens_in = tokens_in
         self._active_reasoning_node.tokens_out = tokens_out
+        self._active_reasoning_node.status = "success"
 
-        if self.core.write_queue:
-            self.core.write_queue.push(
-                self._active_reasoning_node
-            )
+        # push updated node — upsert merges details
+        self._upsert_now(self._active_reasoning_node)
 
         self.on_reasoning_end(
             self._active_reasoning_node,
@@ -112,34 +125,43 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
 
     def on_llm_error(self, error: Exception, **kwargs):
         if self._active_reasoning_node:
-            self.on_error(self._active_reasoning_node, error)
+            self._active_reasoning_node.status = "error"
+            self._active_reasoning_node.error_message = (
+                str(error)
+            )
+            self._upsert_now(self._active_reasoning_node)
 
     # --- tool events ---
 
     def on_tool_start(
-        self,
-        serialized: dict,
-        input_str: str,
-        **kwargs
+        self, serialized: dict, input_str: str, **kwargs
     ):
+        print(f"[TOOL START FIRED] {serialized} {kwargs}")
         self._tool_start_time = time.time()
-        tool_name = (
-            serialized.get("name") or
-            serialized.get("id", ["unknown"])[-1] or
-            kwargs.get("name", "unknown")
-        )
-        print(f"[TRACER] Tool started: {tool_name}")
+        
 
+        tool_name = (
+            kwargs.get("name") or
+            serialized.get("name") or
+            (
+                serialized.get("id", ["unknown"])[-1]
+                if serialized.get("id") else None
+            ) or
+            "unknown_tool"
+        )
         node = self.core.create_tool_call_node(
             tool_name=tool_name,
             input_params={"input": input_str},
         )
-        self._active_tool_node = self.core.record_node(node)
+        self._active_tool_node = (
+            self.core.record_node(node)
+        )
 
-        if self.core.write_queue:
-            self.core.write_queue.push(self._active_tool_node)
+        # write skeleton immediately
+        self._upsert_now(self._active_tool_node)
 
     def on_tool_end(self, output: str, **kwargs):
+        print(f"[TOOL END FIRED] {output[:50]}")
         if not self._active_tool_node:
             return
 
@@ -150,22 +172,25 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         self._active_tool_node.raw_output = output
         self._active_tool_node.status = "success"
 
-        if self.core.write_queue:
-            self.core.write_queue.push(
-                self._active_tool_node
-            )
+        # push completed tool call
+        self._upsert_now(self._active_tool_node)
 
+        # create and immediately write response node
         response_node = self.core.create_tool_response_node(
             tool_name=self._active_tool_node.tool_name,
             raw_output=output,
             status="success",
         )
         self.core.record_node(response_node)
+        self._upsert_now(response_node)
 
     def on_tool_error(self, error: Exception, **kwargs):
         if self._active_tool_node:
             self._active_tool_node.status = "error"
-            self.on_error(self._active_tool_node, error)
+            self._active_tool_node.error_message = (
+                str(error)
+            )
+            self._upsert_now(self._active_tool_node)
 
     # --- base adapter implementation ---
 

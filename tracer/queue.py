@@ -99,25 +99,22 @@ class AsyncWriteQueue:
         await self._write_batch(nodes)
 
     async def _write_batch(self, nodes: list[Node]):
-        """
-        Write a batch of nodes to database with retry and backoff.
-        Falls back to overflow file if all retries fail.
-        """
         for attempt in range(1, self.max_retries + 1):
             try:
-                await self.db_writer.write_nodes(nodes)
+                for node in nodes:
+                    await self.db_writer.upsert_node(node)
                 self._success_count += len(nodes)
                 return
             except Exception as e:
                 wait = 2 ** attempt
                 logger.warning(
-                    f"DB write attempt {attempt} failed: {e}. "
-                    f"Retrying in {wait}s..."
+                    f"DB write attempt {attempt} "
+                    f"failed: {e}. Retrying in {wait}s..."
                 )
                 await asyncio.sleep(wait)
 
         logger.error(
-            f"All {self.max_retries} retries failed. "
+            f"All retries failed. "
             f"Writing {len(nodes)} nodes to overflow."
         )
         for node in nodes:

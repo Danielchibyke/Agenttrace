@@ -12,8 +12,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = "qwen2.5:0.5b"
-EMBEDDING_DIM = 896
+EMBEDDING_MODEL = "nomic-embed-text"
+EMBEDDING_DIM = 768
 
 class EmbeddingEncoder:
     """
@@ -24,7 +24,7 @@ class EmbeddingEncoder:
 
     def __init__(self):
         self.embeddings = OllamaEmbeddings(
-            model="qwen2.5:0.5b"
+            model="nomic-embed-text"
         )
 
     async def encode_node(self, node: Node) -> list[float]:

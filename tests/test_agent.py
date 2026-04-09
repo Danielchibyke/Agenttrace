@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 import uuid
 import logging
@@ -11,7 +15,8 @@ from langchain_classic.prompts import (
     ChatPromptTemplate,
     MessagesPlaceholder
 )
-
+from embeddings.worker import EmbeddingWorker
+from tracer.tool_wrapper import wrap_tools
 from tracer.core import TracerCore
 from tracer.adapters.langchain import LangChainAdapter
 from tracer.queue import AsyncWriteQueue
@@ -67,6 +72,46 @@ EXTENDED_TOOLS = [
 ]
 
 # -------------------------------------------------
+# batch handler — writes immediately then embeds
+# -------------------------------------------------
+
+def make_batch_handler(
+    encoder: EmbeddingEncoder,
+    db_writer: DatabaseWriter
+):
+    async def on_batch_ready(batch):
+        # write to database immediately — no embedding yet
+        # this makes micro nodes visible to WebSocket instantly
+        try:
+            await db_writer.write_micro_nodes(batch)
+        except Exception as e:
+            logging.error(
+                f"Micro node immediate write failed: {e}"
+            )
+
+        # embed asynchronously after writing
+        texts = [m.content for m in batch]
+        try:
+            loop = asyncio.get_event_loop()
+            vectors = await loop.run_in_executor(
+                None,
+                lambda: encoder.embeddings.embed_documents(
+                    texts
+                )
+            )
+            for micro_node, vector in zip(batch, vectors):
+                micro_node.embedding_vector = vector
+                micro_node.embedding_complete = True
+                await db_writer.update_micro_node_embedding(
+                    micro_node.micro_id, vector
+                )
+        except Exception as e:
+            logging.error(f"Batch embedding failed: {e}")
+
+    return on_batch_ready
+
+
+# -------------------------------------------------
 # core agent runner — reusable
 # -------------------------------------------------
 
@@ -77,11 +122,6 @@ async def run_agent_task(
     model: str = "qwen2.5:0.5b",
     verbose: bool = False,
 ) -> dict:
-    """
-    Reusable agent runner.
-    Returns session data for analysis.
-    Used by all test scenarios.
-    """
     if tools is None:
         tools = BASIC_TOOLS
 
@@ -91,14 +131,27 @@ async def run_agent_task(
     encoder = EmbeddingEncoder()
     pattern_library = PatternLibrary(db_writer)
     await pattern_library.setup()
+    
+    # start embedding worker — embeds everything immediately
+    embedding_worker = EmbeddingWorker(
+        encoder=encoder,
+        db_writer=db_writer,
+        batch_size=10,
+        poll_interval_ms=50,
+    )
+    await embedding_worker.start()
 
     write_queue = AsyncWriteQueue(db_writer=db_writer)
     await write_queue.start()
 
+    # token buffer wired to immediate write handler
+    batch_handler = make_batch_handler(encoder, db_writer)
     token_buffer = TokenBuffer(
         session_id=str(uuid.uuid4()),
         batch_size=20,
         batch_interval_ms=100,
+        on_batch_ready=batch_handler,
+        db_writer=db_writer,
     )
     await token_buffer.start()
 
@@ -116,6 +169,13 @@ async def run_agent_task(
     adapter = LangChainAdapter(
         tracer_core=tracer_core,
         token_buffer=token_buffer,
+        embedding_worker=embedding_worker,
+    )
+     # wrap tools so they capture regardless of agent type
+    traced_tools = wrap_tools(
+        tools,
+        tracer_core,
+        embedding_worker,
     )
 
     llm = ChatOllama(
@@ -138,10 +198,12 @@ async def run_agent_task(
         ),
     ])
 
-    agent = create_openai_tools_agent(llm, tools, prompt)
+    agent = create_openai_tools_agent(
+        llm, traced_tools, prompt
+    )
     executor = AgentExecutor(
         agent=agent,
-        tools=tools,
+        tools=traced_tools,
         callbacks=[adapter],
         verbose=verbose,
         return_intermediate_steps=True,
@@ -156,12 +218,22 @@ async def run_agent_task(
         "chat_history": [],
     })
 
-    # flush everything
+    if verbose:
+        print(f"\nAGENT OUTPUT: {result.get('output','')}")
+
+    # flush queues
     await write_queue.stop()
     await token_buffer.stop()
     await asyncio.sleep(1)
 
-    # embed remaining micro nodes
+    await embedding_worker.stop()
+    worker_stats = embedding_worker.get_stats()
+    if verbose:
+        print(
+            f"Embedding worker: "
+            f"{worker_stats['embedded_count']} embedded"
+        )
+    # embed remaining micro nodes that missed batches
     remaining = [
         m for m in token_buffer.get_all_micro_nodes()
         if not m.embedding_complete
@@ -194,6 +266,7 @@ async def run_agent_task(
             )
 
     # embed parent nodes
+    await asyncio.sleep(1)
     vector_storage = VectorStorage(db_writer.pool)
     all_nodes = tracer_core.get_tree().get_all_nodes()
     for node in all_nodes:
@@ -209,12 +282,11 @@ async def run_agent_task(
 
     await asyncio.sleep(0.5)
 
-    # get health
+    # health and pattern
     summary = tracer_core.get_summary()
     health = drift_detector.get_trajectory_summary()
-
-    # auto ingest pattern
     goal_vec = await encoder._embed(task)
+
     node_embeddings = [
         n.embedding_vector for n in all_nodes
         if n.embedding_vector

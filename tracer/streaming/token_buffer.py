@@ -24,12 +24,14 @@ class TokenBuffer:
         batch_interval_ms: int = 100,
         on_visualizer_dispatch=None,
         on_batch_ready=None,
+        db_writer=None,
     ):
         self.session_id = session_id
         self.batch_size = batch_size
         self.batch_interval = batch_interval_ms / 1000
         self.on_visualizer_dispatch = on_visualizer_dispatch
         self.on_batch_ready = on_batch_ready
+        self._db_writer = db_writer
 
         self._buffer: deque = deque()
         self._pending_batch: list[MicroNode] = []
@@ -76,16 +78,24 @@ class TokenBuffer:
             self._pending_batch.append(micro_node)
 
     async def _async_push(self, micro_node: MicroNode):
-        """Async push — runs in the main event loop."""
+        """
+        Async push — runs in the main event loop.
+        Writes skeleton immediately to database.
+        Queues for batch embedding.
+        """
         async with self._lock:
             self._buffer.append(micro_node)
 
-        if self.on_visualizer_dispatch:
+        # write skeleton immediately if db_writer available
+        if hasattr(self, '_db_writer') and self._db_writer:
             try:
-                await self.on_visualizer_dispatch(micro_node)
-                micro_node.dispatched_to_visualizer = True
+                await self._db_writer.upsert_micro_node(
+                    micro_node
+                )
             except Exception as e:
-                logger.error(f"Visualizer dispatch failed: {e}")
+                logger.error(
+                    f"Micro skeleton write failed: {e}"
+                )
 
     def _dispatch_visualizer(self, micro_node: MicroNode):
         """Fire and forget to visualizer."""

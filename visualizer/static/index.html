@@ -179,61 +179,160 @@ function clearScene() {
 }
 
 
+let nodeRegistry = {};
+
 function renderNodes(nodes) {
-  clearScene();
-  currentNodes = nodes;
+  if (!nodes || nodes.length === 0) return;
 
-  const sorted = [...nodes].sort((a, b) => a.step_number - b.step_number);
+  const sorted = [...nodes].sort(
+    (a, b) => (a.step_number || 0) - (b.step_number || 0)
+  );
 
-  sorted.forEach((node, i) => {
-    const color = getNodeColor(node.node_type, node.status);
-    const isHead = i === sorted.length - 1;
-    const size = isHead ? 0.12 : 0.07;
+  sorted.forEach(node => {
+    const existing = nodeRegistry[node.node_id];
 
-    const geo = new THREE.SphereGeometry(size, 16, 16);
-    const mat = new THREE.MeshPhongMaterial({
-      color,
-      emissive: color,
-      emissiveIntensity: isHead ? 0.8 : 0.2,
-      transparent: !isHead,
-      opacity: isHead ? 1.0 : 0.85,
-    });
-
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(node.x * 3, node.y * 3, node.z * 3);
-    mesh.userData = node;
-    scene.add(mesh);
-    nodeMeshes.push(mesh);
-
-    trailPoints.push(new THREE.Vector3(node.x * 3, node.y * 3, node.z * 3));
+    if (!existing) {
+      // new node — add to scene immediately
+      addNodeToScene(node);
+      nodeRegistry[node.node_id] = node;
+    } else if (
+      !existing.has_embedding && node.has_embedding
+    ) {
+      // position update — snap to real HD coordinates
+      updateNodePosition(node);
+      nodeRegistry[node.node_id] = node;
+    }
   });
 
-  // draw trail line
-  if (trailPoints.length > 1) {
+  updateHead(sorted);
+  rebuildTrails(sorted);
+  updateStats(
+    sorted.filter(n => n.is_parent)
+  );
+}
+
+function addNodeToScene(node) {
+  const isMicro = node.node_type === "micro";
+  const isParent = node.is_parent;
+
+  const size = isParent ? 0.09 : 0.025;
+  const color = isParent
+    ? getNodeColor(node.node_type, node.status)
+    : 0x223355;
+  const opacity = isParent ? 0.9 : 0.4;
+
+  const geo = new THREE.SphereGeometry(size, 8, 8);
+  const mat = new THREE.MeshPhongMaterial({
+    color,
+    emissive: color,
+    emissiveIntensity: isParent ? 0.3 : 0.05,
+    transparent: true,
+    opacity,
+  });
+
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(
+    (node.x || 0) * 3,
+    (node.y || 0) * 3,
+    (node.z || 0) * 3
+  );
+  mesh.userData = node;
+  mesh.name = node.node_id;
+  scene.add(mesh);
+  nodeMeshes.push(mesh);
+}
+
+function updateNodePosition(node) {
+  const mesh = scene.getObjectByName(node.node_id);
+  if (!mesh) return;
+
+  // smooth snap to real position
+  const target = new THREE.Vector3(
+    (node.x || 0) * 3,
+    (node.y || 0) * 3,
+    (node.z || 0) * 3
+  );
+  mesh.position.copy(target);
+  mesh.userData = node;
+
+  // brighten when real position arrives
+  if (node.node_type === "micro") {
+    mesh.material.opacity = 0.6;
+    mesh.material.emissiveIntensity = 0.15;
+  }
+}
+
+function updateHead(sorted) {
+  const parents = sorted.filter(n => n.is_parent);
+  if (parents.length === 0) return;
+
+  const lastParent = parents[parents.length - 1];
+
+  const targetX = (lastParent.x || 0) * 3;
+  const targetY = (lastParent.y || 0) * 3;
+  const targetZ = (lastParent.z || 0) * 3;
+
+  headTargetPos.set(targetX, targetY, targetZ);
+
+  if (!headMesh) {
+    headCurrentPos.set(targetX, targetY, targetZ);
+    buildHead();
+  } else {
+    headMoving = true;
+  }
+}
+
+function rebuildTrails(sorted) {
+  const parents = sorted.filter(
+    n => n.is_parent && n.has_embedding
+  );
+  const micros = sorted.filter(
+    n => n.node_type === "micro" && n.has_embedding
+  );
+
+  // parent trail
+  if (parents.length > 1) {
     if (trailLine) scene.remove(trailLine);
-    const geo = new THREE.BufferGeometry().setFromPoints(trailPoints);
-    const mat = new THREE.LineBasicMaterial({ color: 0x334455, linewidth: 1 });
+    const points = parents.map(n =>
+      new THREE.Vector3(
+        (n.x || 0) * 3,
+        (n.y || 0) * 3,
+        (n.z || 0) * 3
+      )
+    );
+    const geo = new THREE.BufferGeometry()
+      .setFromPoints(points);
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x334466,
+    });
     trailLine = new THREE.Line(geo, mat);
     scene.add(trailLine);
   }
 
-  // head glow ring
-  if (sorted.length > 0) {
-    const head = sorted[sorted.length - 1];
-    const ringGeo = new THREE.RingGeometry(0.15, 0.22, 32);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, side: THREE.DoubleSide,
-      transparent: true, opacity: 0.3
+  // micro trail
+  if (micros.length > 1) {
+    const existing = scene.getObjectByName(
+      "micro_trail"
+    );
+    if (existing) scene.remove(existing);
+
+    const points = micros.map(n =>
+      new THREE.Vector3(
+        (n.x || 0) * 3,
+        (n.y || 0) * 3,
+        (n.z || 0) * 3
+      )
+    );
+    const geo = new THREE.BufferGeometry()
+      .setFromPoints(points);
+    const mat = new THREE.LineBasicMaterial({
+      color: 0x112233,
     });
-    headMesh = new THREE.Mesh(ringGeo, ringMat);
-    headMesh.position.set(head.x * 3, head.y * 3, head.z * 3);
-    headMesh.lookAt(camera.position);
-    scene.add(headMesh);
+    const line = new THREE.Line(geo, mat);
+    line.name = "micro_trail";
+    scene.add(line);
   }
-
-  updateStats(sorted);
 }
-
 function updateStats(nodes) {
   document.getElementById("stat-nodes").textContent = nodes.length;
   document.getElementById("stat-reasoning").textContent =

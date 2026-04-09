@@ -261,110 +261,197 @@ async def live_session(websocket: WebSocket, session_id: str):
     logger.info(f"Client connected for session {session_id}")
 
     seen_node_ids = set()
+    seen_micro_ids = set()
 
     try:
         while True:
-            # fetch ALL nodes for session
-            # regardless of whether they have embeddings
+            # fetch parent nodes
             async with db_writer.pool.acquire() as conn:
-                rows = await conn.fetch("""
-                    SELECT
-                        node_id, parent_id, node_type,
-                        step_number, tool_name, status,
-                        latency_ms, timestamp,
-                        embedding_vector::text as embedding_vector
+                parent_rows = await conn.fetch("""
+                    SELECT node_id, parent_id, node_type,
+                    step_number, tool_name, status,
+                    latency_ms, timestamp,
+                    embedding_vector::text as embedding_vector
                     FROM nodes
                     WHERE session_id = $1
                     ORDER BY step_number
                 """, session_id)
 
-            all_nodes = [dict(r) for r in rows]
+                # fetch ALL micro nodes — with and without embeddings
+                micro_rows = await conn.fetch("""
+                    SELECT micro_id, parent_node_id,
+                    content, token_index, timestamp,
+                    embedding_vector::text as embedding_vector
+                    FROM micro_nodes
+                    WHERE session_id = $1
+                    ORDER BY token_index
+                """, session_id)
 
-            if not all_nodes:
-                await asyncio.sleep(0.5)
-                continue
+            parent_nodes = [dict(r) for r in parent_rows]
+            micro_nodes = [dict(r) for r in micro_rows]
 
-            new_nodes = [
-                n for n in all_nodes
+            new_parents = [
+                n for n in parent_nodes
                 if n["node_id"] not in seen_node_ids
             ]
+            new_micros = [
+                n for n in micro_nodes
+                if n["micro_id"] not in seen_micro_ids
+            ]
 
-            if new_nodes:
-                for n in new_nodes:
-                    seen_node_ids.add(n["node_id"])
+            if not new_parents and not new_micros:
+                await asyncio.sleep(0.2)
+                continue
 
-                # separate embedded vs not yet embedded
-                embedded = [
-                    n for n in all_nodes
-                    if n.get("embedding_vector") is not None
-                ]
-                pending = [
-                    n for n in all_nodes
-                    if n.get("embedding_vector") is None
-                ]
+            # mark as seen
+            for n in new_parents:
+                seen_node_ids.add(n["node_id"])
+            for n in new_micros:
+                seen_micro_ids.add(n["micro_id"])
 
-                coords = []
+            # build payload
+            payload_nodes = []
 
-                # project embedded nodes properly
-                if embedded:
-                    vectors = []
-                    meta = []
-                    for node in embedded:
-                        vec = _parse_vector(node["embedding_vector"])
-                        if vec is None:
-                            continue
+            # project embedded parent nodes
+            embedded_parents = [
+                n for n in parent_nodes
+                if n.get("embedding_vector")
+            ]
+            parent_coords = {}
+
+            if embedded_parents:
+                vectors = []
+                meta = []
+                for n in embedded_parents:
+                    vec = _parse_vector(
+                        n["embedding_vector"]
+                    )
+                    if vec:
                         vectors.append(vec)
-                        meta.append(node)
+                        meta.append(n)
 
-                    if vectors:
-                        projected = projector.project(
-                            vectors,
-                            [f"{m['node_type']}_{m['step_number']}"
-                             for m in meta]
-                        )
-                        for i, coord in enumerate(projected):
-                            if i < len(meta):
-                                coord.update({
-                                    "node_id": meta[i]["node_id"],
-                                    "node_type": meta[i]["node_type"],
-                                    "step_number": meta[i]["step_number"],
-                                    "tool_name": meta[i].get("tool_name"),
-                                    "status": meta[i].get("status"),
-                                    "latency_ms": meta[i].get("latency_ms"),
-                                    "has_embedding": True,
-                                })
-                        coords.extend(projected)
+                if vectors:
+                    coords = projector.project(
+                        vectors,
+                        [
+                            f"{m['node_type']}_"
+                            f"{m['step_number']}"
+                            for m in meta
+                        ]
+                    )
+                    for i, coord in enumerate(coords):
+                        if i < len(meta):
+                            node_id = meta[i]["node_id"]
+                            parent_coords[node_id] = coord
+                            payload_nodes.append({
+                                **coord,
+                                "node_id": node_id,
+                                "node_type": meta[i]["node_type"],
+                                "step_number": meta[i]["step_number"],
+                                "tool_name": meta[i].get("tool_name"),
+                                "status": meta[i].get("status"),
+                                "latency_ms": meta[i].get("latency_ms"),
+                                "is_parent": True,
+                                "has_embedding": True,
+                            })
 
-                # add pending nodes at placeholder positions
-                for node in pending:
-                    coords.append({
-                        "node_id": node["node_id"],
-                        "node_type": node["node_type"],
-                        "step_number": node["step_number"],
-                        "tool_name": node.get("tool_name"),
-                        "status": node.get("status"),
-                        "latency_ms": node.get("latency_ms"),
+            # unembedded parent nodes — placeholder position
+            unembedded_parents = [
+                n for n in parent_nodes
+                if not n.get("embedding_vector")
+            ]
+            for n in unembedded_parents:
+                payload_nodes.append({
+                    "node_id": n["node_id"],
+                    "node_type": n["node_type"],
+                    "step_number": n["step_number"],
+                    "tool_name": n.get("tool_name"),
+                    "status": n.get("status"),
+                    "is_parent": True,
+                    "has_embedding": False,
+                    "x": 0.0,
+                    "y": float(n["step_number"]) * 0.3,
+                    "z": 0.0,
+                })
+
+            # micro nodes — immediate with placeholder or real position
+            embedded_micros = [
+                n for n in micro_nodes
+                if n.get("embedding_vector")
+            ]
+
+            micro_coords = {}
+            if embedded_micros:
+                vectors = []
+                meta = []
+                for n in embedded_micros:
+                    vec = _parse_vector(
+                        n["embedding_vector"]
+                    )
+                    if vec:
+                        vectors.append(vec)
+                        meta.append(n)
+
+                if vectors:
+                    coords = projector.project(
+                        vectors,
+                        [
+                            f"token_{m['token_index']}"
+                            for m in meta
+                        ]
+                    )
+                    for i, coord in enumerate(coords):
+                        if i < len(meta):
+                            micro_id = meta[i]["micro_id"]
+                            micro_coords[micro_id] = coord
+
+            # add all micro nodes to payload
+            for n in micro_nodes:
+                micro_id = n["micro_id"]
+                if micro_id in micro_coords:
+                    coord = micro_coords[micro_id]
+                    payload_nodes.append({
+                        **coord,
+                        "node_id": micro_id,
+                        "node_type": "micro",
+                        "step_number": n["token_index"],
+                        "content": n.get("content", ""),
+                        "is_parent": False,
+                        "has_embedding": True,
+                    })
+                else:
+                    # placeholder — appears immediately
+                    # position based on token index
+                    idx = n["token_index"]
+                    angle = idx * 0.3
+                    radius = 0.5 + (idx * 0.02)
+                    payload_nodes.append({
+                        "node_id": micro_id,
+                        "node_type": "micro",
+                        "step_number": idx,
+                        "content": n.get("content", ""),
+                        "is_parent": False,
                         "has_embedding": False,
-                        # placeholder position near origin
-                        # will update when embedding arrives
-                        "x": 0.0,
-                        "y": float(node["step_number"]) * 0.1,
-                        "z": 0.0,
+                        # spiral placeholder position
+                        "x": radius * 0.5,
+                        "y": float(idx) * 0.05,
+                        "z": radius * 0.3,
                     })
 
+            if payload_nodes:
                 await websocket.send_json({
                     "event": "update",
                     "session_id": session_id,
-                    "nodes": coords,
+                    "nodes": payload_nodes,
                     "latest_step": max(
-                        n["step_number"] for n in all_nodes
+                        (n.get("step_number", 0)
+                         for n in payload_nodes),
+                        default=0
                     ),
-                    "total_nodes": len(all_nodes),
-                    "embedded_count": len(embedded),
-                    "pending_count": len(pending),
+                    "total_nodes": len(payload_nodes),
                 })
 
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)
 
     except WebSocketDisconnect:
         if websocket in active_connections:
