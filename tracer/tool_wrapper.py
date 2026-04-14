@@ -1,68 +1,82 @@
 import time
-import asyncio
 import logging
 from langchain_classic.tools import BaseTool
-from tracer.node import NodeType
 from tracer.core import TracerCore
 
 logger = logging.getLogger(__name__)
 
 
-def wrap_tool(tool: BaseTool, tracer_core: TracerCore, embedding_worker=None) -> BaseTool:
+class TracedTool(BaseTool):
     """
-    Wraps a LangChain tool to capture execution
-    as nodes regardless of how the agent invokes it.
-    Works with any agent type.
+    Wraps any LangChain tool to capture execution
+    as nodes. Preserves all tool metadata so
+    LangChain can still convert it to OpenAI format.
     """
-    original_run = tool._run
-    original_arun = tool._arun
+    wrapped_tool: object = None
+    tracer_core: object = None
+    embedding_worker: object = None
 
-    def traced_run(tool_input, **kwargs):
+    class Config:
+        arbitrary_types_allowed = True
+
+    def _run(self, *args, **kwargs):
         start_time = time.time()
 
-        # create tool call node immediately
-        node = tracer_core.create_tool_call_node(
-            tool_name=tool.name,
-            input_params={"input": tool_input},
+        tool_input = (
+            args[0] if args
+            else kwargs.get("input", str(kwargs))
         )
-        tracer_core.record_node(node)
 
-        if tracer_core.write_queue:
-            tracer_core.write_queue.push(node)
+        node = self.tracer_core.create_tool_call_node(
+            tool_name=self.name,
+            input_params=(
+                {"input": tool_input}
+                if isinstance(tool_input, str)
+                else tool_input
+            ),
+        )
+        self.tracer_core.record_node(node)
 
-        if embedding_worker:
-            embedding_worker.queue_node(node)
+        if self.tracer_core.write_queue:
+            self.tracer_core.write_queue.push(node)
+
+        if self.embedding_worker:
+            self.embedding_worker.queue_node(node)
 
         try:
-            output = original_run(tool_input, **kwargs)
+            output = self.wrapped_tool._run(
+                *args, **kwargs
+            )
             latency = (time.time() - start_time) * 1000
 
-            # update with result
             node.raw_output = output
             node.status = "success"
             node.latency_ms = latency
 
-            if tracer_core.write_queue:
-                tracer_core.write_queue.push(node)
+            if self.tracer_core.write_queue:
+                self.tracer_core.write_queue.push(node)
 
-            if embedding_worker:
-                embedding_worker.queue_node(node)
+            if self.embedding_worker:
+                self.embedding_worker.queue_node(node)
 
-            # create response node
             response_node = (
-                tracer_core.create_tool_response_node(
-                    tool_name=tool.name,
+                self.tracer_core.create_tool_response_node(
+                    tool_name=self.name,
                     raw_output=output,
                     status="success",
                 )
             )
-            tracer_core.record_node(response_node)
+            self.tracer_core.record_node(response_node)
 
-            if tracer_core.write_queue:
-                tracer_core.write_queue.push(response_node)
+            if self.tracer_core.write_queue:
+                self.tracer_core.write_queue.push(
+                    response_node
+                )
 
-            if embedding_worker:
-                embedding_worker.queue_node(response_node)
+            if self.embedding_worker:
+                self.embedding_worker.queue_node(
+                    response_node
+                )
 
             return output
 
@@ -72,62 +86,77 @@ def wrap_tool(tool: BaseTool, tracer_core: TracerCore, embedding_worker=None) ->
             node.latency_ms = (
                 time.time() - start_time
             ) * 1000
-
-            if tracer_core.write_queue:
-                tracer_core.write_queue.push(node)
-
+            if self.tracer_core.write_queue:
+                self.tracer_core.write_queue.push(node)
             raise
 
-    async def traced_arun(tool_input, **kwargs):
+    async def _arun(self, *args, **kwargs):
         start_time = time.time()
 
-        node = tracer_core.create_tool_call_node(
-            tool_name=tool.name,
-            input_params={"input": tool_input},
+        tool_input = (
+            args[0] if args
+            else kwargs.get("input", str(kwargs))
         )
-        tracer_core.record_node(node)
 
-        if tracer_core.write_queue:
-            tracer_core.write_queue.push(node)
+        node = self.tracer_core.create_tool_call_node(
+            tool_name=self.name,
+            input_params=(
+                {"input": tool_input}
+                if isinstance(tool_input, str)
+                else tool_input
+            ),
+        )
+        self.tracer_core.record_node(node)
 
-        if embedding_worker:
-            embedding_worker.queue_node(node)
+        if self.tracer_core.write_queue:
+            self.tracer_core.write_queue.push(node)
+
+        if self.embedding_worker:
+            self.embedding_worker.queue_node(node)
 
         try:
-            if original_arun:
-                output = await original_arun(
-                    tool_input, **kwargs
-                )
-            else:
-                output = original_run(
-                    tool_input, **kwargs
-                )
+            # call the original tool's run method directly
+            # bypassing _arun entirely to avoid config issues
+            output = self.wrapped_tool._run(
+                *args,
+                **{
+                    k: v for k, v in kwargs.items()
+                    if k not in [
+                        "config", "run_manager",
+                        "callbacks"
+                    ]
+                }
+            )
 
             latency = (time.time() - start_time) * 1000
             node.raw_output = output
             node.status = "success"
             node.latency_ms = latency
 
-            if tracer_core.write_queue:
-                tracer_core.write_queue.push(node)
+            if self.tracer_core.write_queue:
+                self.tracer_core.write_queue.push(node)
 
-            if embedding_worker:
-                embedding_worker.queue_node(node)
+            if self.embedding_worker:
+                self.embedding_worker.queue_node(node)
 
             response_node = (
-                tracer_core.create_tool_response_node(
-                    tool_name=tool.name,
+                self.tracer_core.create_tool_response_node(
+                    tool_name=self.name,
                     raw_output=output,
                     status="success",
                 )
             )
-            tracer_core.record_node(response_node)
+            self.tracer_core.record_node(response_node)
 
-            if tracer_core.write_queue:
-                tracer_core.write_queue.push(response_node)
+            if self.tracer_core.write_queue:
+                self.tracer_core.write_queue.push(
+                    response_node
+                )
 
-            if embedding_worker:
-                embedding_worker.queue_node(response_node)
+            if self.embedding_worker:
+                self.embedding_worker.queue_node(
+                    response_node
+                )
 
             return output
 
@@ -137,24 +166,28 @@ def wrap_tool(tool: BaseTool, tracer_core: TracerCore, embedding_worker=None) ->
             node.latency_ms = (
                 time.time() - start_time
             ) * 1000
-
-            if tracer_core.write_queue:
-                tracer_core.write_queue.push(node)
-
+            if self.tracer_core.write_queue:
+                self.tracer_core.write_queue.push(node)
             raise
-
-    tool._run = traced_run
-    tool._arun = traced_arun
-    return tool
-
 
 def wrap_tools(
     tools: list,
     tracer_core: TracerCore,
     embedding_worker=None,
 ) -> list:
-    """Wrap a list of tools for tracing."""
-    return [
-        wrap_tool(t, tracer_core, embedding_worker)
-        for t in tools
-    ]
+    """
+    Wrap a list of tools for tracing.
+    Preserves all tool metadata and schema.
+    """
+    wrapped = []
+    for t in tools:
+        traced = TracedTool(
+            name=t.name,
+            description=t.description,
+            args_schema=t.args_schema,
+            wrapped_tool=t,
+            tracer_core=tracer_core,
+            embedding_worker=embedding_worker,
+        )
+        wrapped.append(traced)
+    return wrapped

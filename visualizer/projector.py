@@ -15,18 +15,22 @@ class HDProjector:
 
     def __init__(self, n_components: int = 3):
         self.n_components = n_components
-        self._fitted_reducer = None
-        self._fitted_vectors = None
+        self._cache: dict = {}
+        self._fitted_matrix = None
+        self._fitted_coords = None
+
+    def _cache_key(self, vectors: list) -> str:
+        """Generate cache key from vectors."""
+        data = str([v[:5] for v in vectors[:3]])
+        return hashlib.md5(
+            data.encode()
+        ).hexdigest()[:16]
 
     def project(
         self,
         vectors: list[list[float]],
         labels: list[str] = None
     ) -> list[dict]:
-        """
-        Project a list of HD vectors to 3D coordinates.
-        Returns list of dicts with x, y, z and metadata.
-        """
         if not vectors:
             return []
 
@@ -59,10 +63,6 @@ class HDProjector:
         matrix: np.ndarray,
         n_samples: int
     ) -> np.ndarray:
-        """
-        Use UMAP for larger batches.
-        Fall back to PCA for small batches.
-        """
         if n_samples >= 10:
             try:
                 import umap
@@ -71,24 +71,37 @@ class HDProjector:
                     n_neighbors=min(5, n_samples - 1),
                     min_dist=0.1,
                     metric="cosine",
-                    random_state=42
+                    random_state=42,
+                    transform_seed=42,
                 )
                 return reducer.fit_transform(matrix)
             except Exception as e:
-                logger.warning(f"UMAP failed, falling back to PCA: {e}")
+                logger.warning(
+                    f"UMAP failed, falling back to PCA: {e}"
+                )
 
         return self._pca_reduce(matrix)
 
-    def _pca_reduce(self, matrix: np.ndarray) -> np.ndarray:
-        """Simple PCA reduction for small batches."""
+    def _pca_reduce(
+        self, matrix: np.ndarray
+    ) -> np.ndarray:
         from sklearn.decomposition import PCA
-        n_components = min(self.n_components, matrix.shape[0],
-                          matrix.shape[1])
-        pca = PCA(n_components=n_components)
+        n_components = min(
+            self.n_components,
+            matrix.shape[0],
+            matrix.shape[1]
+        )
+        pca = PCA(
+            n_components=n_components,
+            random_state=42
+        )
         reduced = pca.fit_transform(matrix)
 
         if reduced.shape[1] < 3:
-            padding = np.zeros((reduced.shape[0], 3 - reduced.shape[1]))
+            padding = np.zeros((
+                reduced.shape[0],
+                3 - reduced.shape[1]
+            ))
             reduced = np.hstack([reduced, padding])
 
         return reduced

@@ -479,6 +479,7 @@ async function loadSession() {
   const data = await res.json();
   if (data.error) { alert(data.error); return; }
   renderNodes(data.nodes);
+  document.getElementById("status").style.display = "none";
 }
 
 async function loadLatestSession() {
@@ -491,6 +492,8 @@ async function loadLatestSession() {
   const data = await res2.json();
   if (data.error) { alert(data.error); return; }
   renderNodes(data.nodes);
+  document.getElementById("status").style.display = "none";
+  
 }
 
 async function loadMicroSession() {

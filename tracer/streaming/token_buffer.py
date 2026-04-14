@@ -25,6 +25,7 @@ class TokenBuffer:
         on_visualizer_dispatch=None,
         on_batch_ready=None,
         db_writer=None,
+        embedding_worker=None
     ):
         self.session_id = session_id
         self.batch_size = batch_size
@@ -32,6 +33,7 @@ class TokenBuffer:
         self.on_visualizer_dispatch = on_visualizer_dispatch
         self.on_batch_ready = on_batch_ready
         self._db_writer = db_writer
+        self._embedding_worker = embedding_worker
 
         self._buffer: deque = deque()
         self._pending_batch: list[MicroNode] = []
@@ -96,6 +98,11 @@ class TokenBuffer:
                 logger.error(
                     f"Micro skeleton write failed: {e}"
                 )
+            # push to Redis embedding queue immediately
+        if hasattr(self, '_embedding_worker') and (
+            self._embedding_worker
+        ):
+            self._embedding_worker.queue_micro(micro_node)       
 
     def _dispatch_visualizer(self, micro_node: MicroNode):
         """Fire and forget to visualizer."""

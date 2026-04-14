@@ -16,7 +16,7 @@ from langchain_classic.prompts import (
     MessagesPlaceholder
 )
 from embeddings.worker import EmbeddingWorker
-from tracer.tool_wrapper import wrap_tools
+
 from tracer.core import TracerCore
 from tracer.adapters.langchain import LangChainAdapter
 from tracer.queue import AsyncWriteQueue
@@ -152,6 +152,7 @@ async def run_agent_task(
         batch_interval_ms=100,
         on_batch_ready=batch_handler,
         db_writer=db_writer,
+        embedding_worker = embedding_worker,
     )
     await token_buffer.start()
 
@@ -170,12 +171,6 @@ async def run_agent_task(
         tracer_core=tracer_core,
         token_buffer=token_buffer,
         embedding_worker=embedding_worker,
-    )
-     # wrap tools so they capture regardless of agent type
-    traced_tools = wrap_tools(
-        tools,
-        tracer_core,
-        embedding_worker,
     )
 
     llm = ChatOllama(
@@ -199,11 +194,11 @@ async def run_agent_task(
     ])
 
     agent = create_openai_tools_agent(
-        llm, traced_tools, prompt
+        llm, tools, prompt
     )
     executor = AgentExecutor(
         agent=agent,
-        tools=traced_tools,
+        tools=tools,
         callbacks=[adapter],
         verbose=verbose,
         return_intermediate_steps=True,

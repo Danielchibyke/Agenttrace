@@ -166,8 +166,9 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
             return
 
         latency = (
-            time.time() - self._tool_start_time
-        ) * 1000
+            (time.time() - self._tool_start_time ) * 1000
+             if self._tool_start_time else 0  
+            )
         self._active_tool_node.latency_ms = latency
         self._active_tool_node.raw_output = output
         self._active_tool_node.status = "success"
@@ -191,6 +192,46 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
                 str(error)
             )
             self._upsert_now(self._active_tool_node)
+            
+    def on_agent_action(
+        self,
+        action,
+        **kwargs
+    ) -> None:
+        """
+        Fires every time the agent decides to use a tool.
+        More reliable than on_tool_start for all agent types.
+        """
+        self._tool_start_time = time.time()
+
+        tool_name = action.tool
+        tool_input = action.tool_input
+
+        node = self.core.create_tool_call_node(
+            tool_name=tool_name,
+            input_params=(
+                tool_input
+                if isinstance(tool_input, dict)
+                else {"input": str(tool_input)}
+            ),
+        )
+        self._active_tool_node = self.core.record_node(node)
+        self._upsert_now(self._active_tool_node)
+
+        if hasattr(self.core, 'token_buffer') and (
+            self.core.token_buffer
+        ):
+            pass
+
+    def on_agent_finish(
+        self,
+        finish,
+        **kwargs
+    ) -> None:
+        """
+        Fires when agent completes its final answer.
+        """
+        pass        
 
     # --- base adapter implementation ---
 
