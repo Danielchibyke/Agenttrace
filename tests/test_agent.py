@@ -1,6 +1,8 @@
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+))
 
 import asyncio
 import uuid
@@ -15,15 +17,14 @@ from langchain_classic.prompts import (
     ChatPromptTemplate,
     MessagesPlaceholder
 )
-from embeddings.worker import EmbeddingWorker
 
 from tracer.core import TracerCore
 from tracer.adapters.langchain import LangChainAdapter
 from tracer.queue import AsyncWriteQueue
 from tracer.streaming.token_buffer import TokenBuffer
 from storage.database import DatabaseWriter
-from storage.vector import VectorStorage
 from embeddings.encoder import EmbeddingEncoder
+from embeddings.worker import EmbeddingWorker
 from intelligence.pattern_library import PatternLibrary
 from intelligence.drift_detector import DriftDetector
 
@@ -72,46 +73,6 @@ EXTENDED_TOOLS = [
 ]
 
 # -------------------------------------------------
-# batch handler — writes immediately then embeds
-# -------------------------------------------------
-
-def make_batch_handler(
-    encoder: EmbeddingEncoder,
-    db_writer: DatabaseWriter
-):
-    async def on_batch_ready(batch):
-        # write to database immediately — no embedding yet
-        # this makes micro nodes visible to WebSocket instantly
-        try:
-            await db_writer.write_micro_nodes(batch)
-        except Exception as e:
-            logging.error(
-                f"Micro node immediate write failed: {e}"
-            )
-
-        # embed asynchronously after writing
-        texts = [m.content for m in batch]
-        try:
-            loop = asyncio.get_event_loop()
-            vectors = await loop.run_in_executor(
-                None,
-                lambda: encoder.embeddings.embed_documents(
-                    texts
-                )
-            )
-            for micro_node, vector in zip(batch, vectors):
-                micro_node.embedding_vector = vector
-                micro_node.embedding_complete = True
-                await db_writer.update_micro_node_embedding(
-                    micro_node.micro_id, vector
-                )
-        except Exception as e:
-            logging.error(f"Batch embedding failed: {e}")
-
-    return on_batch_ready
-
-
-# -------------------------------------------------
 # core agent runner — reusable
 # -------------------------------------------------
 
@@ -125,54 +86,58 @@ async def run_agent_task(
     if tools is None:
         tools = BASIC_TOOLS
 
+    # setup database
     db_writer = DatabaseWriter()
     await db_writer.connect()
 
     encoder = EmbeddingEncoder()
+
+    # setup pattern library
     pattern_library = PatternLibrary(db_writer)
     await pattern_library.setup()
-    
-    # start embedding worker — embeds everything immediately
-    embedding_worker = EmbeddingWorker(
-        encoder=encoder,
-        db_writer=db_writer,
-        batch_size=10,
-        poll_interval_ms=50,
-    )
+
+    # setup Redis embedding worker
+    # pushes to embedding service — never blocks agent
+    embedding_worker = EmbeddingWorker()
     await embedding_worker.start()
 
+    # setup write queue
     write_queue = AsyncWriteQueue(db_writer=db_writer)
     await write_queue.start()
 
-    # token buffer wired to immediate write handler
-    batch_handler = make_batch_handler(encoder, db_writer)
+    # setup token buffer
+    # writes micro skeletons immediately to database
+    # pushes content to Redis for embedding
     token_buffer = TokenBuffer(
         session_id=str(uuid.uuid4()),
         batch_size=20,
         batch_interval_ms=100,
-        on_batch_ready=batch_handler,
         db_writer=db_writer,
-        embedding_worker = embedding_worker,
+        embedding_worker=embedding_worker,
     )
     await token_buffer.start()
 
+    # setup tracer core
     tracer_core = TracerCore(
         task_id=task_id or str(uuid.uuid4()),
         write_queue=write_queue,
         token_buffer=token_buffer,
     )
 
+    # setup drift detector
     drift_detector = DriftDetector(
         pattern_library=pattern_library,
         task_type="auto",
     )
 
+    # setup adapter
     adapter = LangChainAdapter(
         tracer_core=tracer_core,
         token_buffer=token_buffer,
         embedding_worker=embedding_worker,
     )
 
+    # setup llm
     llm = ChatOllama(
         model=model,
         temperature=0,
@@ -208,85 +173,68 @@ async def run_agent_task(
     if verbose:
         print(f"\nTASK: {task}")
 
+    # run agent
     result = await executor.ainvoke({
         "input": task,
         "chat_history": [],
     })
 
     if verbose:
-        print(f"\nAGENT OUTPUT: {result.get('output','')}")
+        print(
+            f"\nAGENT OUTPUT: "
+            f"{result.get('output', '')}"
+        )
 
     # flush queues
     await write_queue.stop()
     await token_buffer.stop()
-    await asyncio.sleep(1)
 
-    await embedding_worker.stop()
+    # give embedding service time to process queue
+    # embeddings happen in separate process — just wait
+    await asyncio.sleep(3)
+
     worker_stats = embedding_worker.get_stats()
+    await embedding_worker.stop()
+
     if verbose:
         print(
-            f"Embedding worker: "
-            f"{worker_stats['embedded_count']} embedded"
+            f"Queued for embedding: "
+            f"{worker_stats['queued_count']}"
         )
-    # embed remaining micro nodes that missed batches
-    remaining = [
-        m for m in token_buffer.get_all_micro_nodes()
-        if not m.embedding_complete
-    ]
-    if remaining:
-        texts = [m.content for m in remaining]
-        try:
-            loop = asyncio.get_event_loop()
-            vectors = await loop.run_in_executor(
-                None,
-                lambda: encoder.embeddings.embed_documents(
-                    texts
-                )
-            )
-            for micro_node, vector in zip(
-                remaining, vectors
-            ):
-                micro_node.embedding_vector = vector
-                micro_node.embedding_complete = True
-            await db_writer.write_micro_nodes(remaining)
-            for micro_node, vector in zip(
-                remaining, vectors
-            ):
-                await db_writer.update_micro_node_embedding(
-                    micro_node.micro_id, vector
-                )
-        except Exception as e:
-            logging.error(
-                f"Remaining embedding failed: {e}"
-            )
+        print(
+            f"Queue remaining: "
+            f"{worker_stats['queue_sizes']}"
+        )
 
-    # embed parent nodes
-    await asyncio.sleep(1)
-    vector_storage = VectorStorage(db_writer.pool)
-    all_nodes = tracer_core.get_tree().get_all_nodes()
-    for node in all_nodes:
-        try:
-            vector = await encoder.encode_node(node)
-            if vector:
-                node.embedding_vector = vector
-                await vector_storage.store_embedding(
-                    node.node_id, vector
-                )
-        except Exception as e:
-            logging.error(f"Node embedding failed: {e}")
-
-    await asyncio.sleep(0.5)
-
-    # health and pattern
+    # fetch final state from database
     summary = tracer_core.get_summary()
     health = drift_detector.get_trajectory_summary()
     goal_vec = await encoder._embed(task)
 
-    node_embeddings = [
-        n.embedding_vector for n in all_nodes
-        if n.embedding_vector
-    ]
+    all_nodes = tracer_core.get_tree().get_all_nodes()
 
+    # fetch embeddings from db
+    # embedding service wrote them asynchronously
+    node_embeddings = []
+    async with db_writer.pool.acquire() as conn:
+        for node in all_nodes:
+            row = await conn.fetchrow(
+                """
+                SELECT embedding_vector::text
+                FROM nodes WHERE node_id = $1
+                """,
+                node.node_id
+            )
+            if row and row["embedding_vector"]:
+                vec = [
+                    float(x) for x in
+                    row["embedding_vector"]
+                    .strip("[]").split(",")
+                ]
+                node.embedding_vector = vec
+                node_embeddings.append(vec)
+
+    # ingest pattern
     ingest_result = await pattern_library.ingest(
         session_id=tracer_core.session_id,
         goal_text=task,

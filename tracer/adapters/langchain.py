@@ -56,9 +56,9 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         self._active_reasoning_node = (
             self.core.record_node(node)
         )
-
         # write skeleton immediately — no details yet
         self._upsert_now(self._active_reasoning_node)
+
 
     def on_llm_new_token(self, token: str, **kwargs):
         if not self._active_reasoning_node:
@@ -136,7 +136,6 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
     def on_tool_start(
         self, serialized: dict, input_str: str, **kwargs
     ):
-        print(f"[TOOL START FIRED] {serialized} {kwargs}")
         self._tool_start_time = time.time()
         
 
@@ -161,7 +160,7 @@ class LangChainAdapter(BaseCallbackHandler, BaseAdapter):
         self._upsert_now(self._active_tool_node)
 
     def on_tool_end(self, output: str, **kwargs):
-        print(f"[TOOL END FIRED] {output[:50]}")
+        
         if not self._active_tool_node:
             return
 
