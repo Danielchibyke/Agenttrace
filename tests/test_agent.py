@@ -8,6 +8,10 @@ import asyncio
 import uuid
 import logging
 from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI 
+from langchain_groq import ChatGroq
+
 from langchain_classic.agents import (
     AgentExecutor,
     create_openai_tools_agent
@@ -29,6 +33,10 @@ from intelligence.pattern_library import PatternLibrary
 from intelligence.drift_detector import DriftDetector
 
 logging.basicConfig(level=logging.WARNING)
+
+os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY", "")
+os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
+os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY", "")
 
 # -------------------------------------------------
 # tools
@@ -72,6 +80,12 @@ EXTENDED_TOOLS = [
     save_note, read_file, write_file
 ]
 
+OllamaModel = "qwen2.5:0.5b"
+geminiModel = "gemini-1.5-flash-100b"  # or "gemini-1.5-pro-flash-100b" for Pro users
+OpenAIModel = "gpt-3.5-turbo"
+GroqModel = "llama-3.1-8b-instant"
+llms = [OllamaModel, geminiModel, OpenAIModel, GroqModel]
+
 # -------------------------------------------------
 # core agent runner — reusable
 # -------------------------------------------------
@@ -80,7 +94,7 @@ async def run_agent_task(
     task: str,
     task_id: str = None,
     tools: list = None,
-    model: str = "qwen2.5:0.5b",
+    model: str = GroqModel,
     verbose: bool = False,
 ) -> dict:
     if tools is None:
@@ -104,12 +118,17 @@ async def run_agent_task(
     # setup write queue
     write_queue = AsyncWriteQueue(db_writer=db_writer)
     await write_queue.start()
-
+    
+    #  # CREATE PARENT NODE FIRST
+    # parent_node_id = str(uuid.uuid4())
+    # session_id = str(uuid.uuid4())
+    
     # setup token buffer
     # writes micro skeletons immediately to database
     # pushes content to Redis for embedding
     token_buffer = TokenBuffer(
         session_id=str(uuid.uuid4()),
+        # parent_node_id=parent_node_id,
         batch_size=20,
         batch_interval_ms=100,
         db_writer=db_writer,
@@ -138,12 +157,47 @@ async def run_agent_task(
     )
 
     # setup llm
-    llm = ChatOllama(
-        model=model,
-        temperature=0,
-        streaming=True,
-        callbacks=[adapter],
-    )
+    
+    
+    if(model == OllamaModel):
+    #ollam llm with streaming and callbacks to capture tokens and micro skeletons
+    
+        llm = ChatOllama(
+            model=model,
+            temperature=0,
+            streaming=True,
+            callbacks=[adapter],
+        )
+    else:
+        if(model == geminiModel):
+    # gemini llm with streaming and callbacks to capture tokens and micro skeletons
+            llm = ChatGoogleGenerativeAI(
+                model=model,
+                temperature=0,
+                streaming=True,
+                callbacks=[adapter],
+                convert_system_message_to_human=True,
+            )
+        else:
+            if(model == OpenAIModel):
+    
+    # openai llm with streaming and callbacks to capture tokens and micro skeletons
+                llm = ChatOpenAI(
+                    model=model,
+                    temperature=0,
+                    streaming=True,
+                    callbacks=[adapter],
+                )
+            else:
+                if(model == GroqModel):
+    # groq llm with streaming and callbacks to capture tokens and micro skeletons
+                    llm = ChatGroq(
+                        model=model,
+                        temperature=0,
+                        streaming=True,
+                        callbacks=[adapter],
+                        max_tokens=1024,
+                    )
 
     prompt = ChatPromptTemplate.from_messages([
         (

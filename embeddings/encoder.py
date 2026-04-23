@@ -24,7 +24,8 @@ class EmbeddingEncoder:
 
     def __init__(self):
         self.embeddings = OllamaEmbeddings(
-            model="nomic-embed-text"
+            model=EMBEDDING_MODEL,
+           
         )
 
     async def encode_node(self, node: Node) -> list[float]:

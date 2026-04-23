@@ -5,7 +5,7 @@ from tests.test_agent import run_agent_task
 logging.basicConfig(level=logging.WARNING)
 
 DEFAULT_TASK = (
-    "Search for information about AI agents, "
+    "Search for information about pawpaw fruit, "
     "calculate 15 * 24, then save a note "
     "summarizing what you found."
 )

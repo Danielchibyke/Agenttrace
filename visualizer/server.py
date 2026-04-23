@@ -1,4 +1,5 @@
 import asyncio
+from fastapi.responses import StreamingResponse
 import json
 import logging
 import os
@@ -497,6 +498,240 @@ async def live_session(
             active_connections.remove(websocket)
         if pubsub:
             await pubsub.unsubscribe(EMBEDDING_READY)
+            
+@app.get("/stream/{session_id}")
+async def stream_session(session_id: str):
+    """
+    SSE endpoint for live session streaming.
+    Faster and lighter than WebSocket for push-only updates.
+    Browser reconnects automatically if connection drops.
+    """
+    async def event_generator():
+        seen_node_ids = set()
+        seen_micro_ids = set()
+
+        # subscribe to Redis embedding ready events
+        pubsub = None
+        if redis_client:
+            pubsub = redis_client.pubsub()
+            await pubsub.subscribe(EMBEDDING_READY)
+
+        async def get_payload():
+            async with db_writer.pool.acquire() as conn:
+                parent_rows = await conn.fetch("""
+                    SELECT node_id, node_type,
+                    step_number, tool_name, status,
+                    latency_ms,
+                    embedding_vector::text as embedding_vector
+                    FROM nodes
+                    WHERE session_id = $1
+                    ORDER BY step_number
+                """, session_id)
+
+                micro_rows = await conn.fetch("""
+                    SELECT micro_id, content,
+                    token_index,
+                    embedding_vector::text as embedding_vector
+                    FROM micro_nodes
+                    WHERE session_id = $1
+                    ORDER BY token_index
+                """, session_id)
+
+            parent_nodes = [dict(r) for r in parent_rows]
+            micro_nodes = [dict(r) for r in micro_rows]
+
+            new_parents = [
+                n for n in parent_nodes
+                if n["node_id"] not in seen_node_ids
+            ]
+            new_micros = [
+                n for n in micro_nodes
+                if n["micro_id"] not in seen_micro_ids
+            ]
+
+            if not new_parents and not new_micros:
+                return None
+
+            for n in new_parents:
+                seen_node_ids.add(n["node_id"])
+            for n in new_micros:
+                seen_micro_ids.add(n["micro_id"])
+
+            payload_nodes = []
+
+            # project embedded parents
+            embedded_parents = [
+                n for n in parent_nodes
+                if n.get("embedding_vector")
+            ]
+            if embedded_parents:
+                vectors = []
+                meta = []
+                for n in embedded_parents:
+                    vec = _parse_vector(
+                        n["embedding_vector"]
+                    )
+                    if vec:
+                        vectors.append(vec)
+                        meta.append(n)
+                if vectors:
+                    coords = projector.project(
+                        vectors,
+                        [
+                            f"{m['node_type']}_"
+                            f"{m['step_number']}"
+                            for m in meta
+                        ]
+                    )
+                    for i, coord in enumerate(coords):
+                        if i < len(meta):
+                            payload_nodes.append({
+                                **coord,
+                                "node_id": meta[i]["node_id"],
+                                "node_type": meta[i]["node_type"],
+                                "step_number": meta[i]["step_number"],
+                                "tool_name": meta[i].get("tool_name"),
+                                "status": meta[i].get("status"),
+                                "latency_ms": meta[i].get("latency_ms"),
+                                "is_parent": True,
+                                "has_embedding": True,
+                            })
+
+            # unembedded parents
+            for n in parent_nodes:
+                if not n.get("embedding_vector"):
+                    payload_nodes.append({
+                        "node_id": n["node_id"],
+                        "node_type": n["node_type"],
+                        "step_number": n["step_number"],
+                        "tool_name": n.get("tool_name"),
+                        "status": n.get("status"),
+                        "is_parent": True,
+                        "has_embedding": False,
+                        "x": 0.0,
+                        "y": float(n["step_number"]) * 0.3,
+                        "z": 0.0,
+                    })
+
+            # project embedded micros
+            embedded_micros = [
+                n for n in micro_nodes
+                if n.get("embedding_vector")
+            ]
+            micro_coords = {}
+            if embedded_micros:
+                vectors = []
+                meta = []
+                for n in embedded_micros:
+                    vec = _parse_vector(
+                        n["embedding_vector"]
+                    )
+                    if vec:
+                        vectors.append(vec)
+                        meta.append(n)
+                if vectors:
+                    coords = projector.project(
+                        vectors,
+                        [
+                            f"token_{m['token_index']}"
+                            for m in meta
+                        ]
+                    )
+                    for i, coord in enumerate(coords):
+                        if i < len(meta):
+                            micro_coords[
+                                meta[i]["micro_id"]
+                            ] = coord
+
+            for n in micro_nodes:
+                micro_id = n["micro_id"]
+                if micro_id in micro_coords:
+                    coord = micro_coords[micro_id]
+                    payload_nodes.append({
+                        **coord,
+                        "node_id": micro_id,
+                        "node_type": "micro",
+                        "step_number": n["token_index"],
+                        "content": n.get("content", ""),
+                        "is_parent": False,
+                        "has_embedding": True,
+                    })
+                else:
+                    idx = n["token_index"]
+                    radius = 0.5 + (idx * 0.02)
+                    payload_nodes.append({
+                        "node_id": micro_id,
+                        "node_type": "micro",
+                        "step_number": idx,
+                        "content": n.get("content", ""),
+                        "is_parent": False,
+                        "has_embedding": False,
+                        "x": radius * 0.5,
+                        "y": float(idx) * 0.05,
+                        "z": radius * 0.3,
+                    })
+
+            return payload_nodes
+
+        try:
+            # send initial heartbeat
+            yield "data: {\"event\": \"connected\"}\n\n"
+
+            # send initial state
+            payload = await get_payload()
+            if payload:
+                yield (
+                    f"data: {json.dumps({'event': 'update', 'nodes': payload})}\n\n"
+                )
+
+            # listen for Redis events + poll fallback
+            async def redis_events():
+                if not pubsub:
+                    return
+                async for message in pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+                    try:
+                        data = json.loads(
+                            message["data"]
+                        )
+                        if data.get("session_id") == (
+                            session_id
+                        ):
+                            payload = await get_payload()
+                            if payload:
+                                yield (
+                                    f"data: {json.dumps({'event': 'update', 'nodes': payload})}\n\n"
+                                )
+                    except Exception:
+                        continue
+
+            # poll every 500ms as fallback
+            poll_count = 0
+            while True:
+                await asyncio.sleep(0.5)
+                payload = await get_payload()
+                if payload:
+                    yield (
+                        f"data: {json.dumps({'event': 'update', 'nodes': payload})}\n\n"
+                    )
+                poll_count += 1
+                # heartbeat every 15 seconds
+                if poll_count % 30 == 0:
+                    yield "data: {\"event\": \"heartbeat\"}\n\n"
+
+        except asyncio.CancelledError:
+            if pubsub:
+                await pubsub.unsubscribe(EMBEDDING_READY)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
+    )            
             
 async def push_node_to_clients(session_id: str, node_data: dict):
     """

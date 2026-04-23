@@ -513,30 +513,95 @@ async function loadMicroSession() {
 }
 
 let ws = null;
+ //connect to live session via WebSocket
+  // function connectLive() {
+  //   const id = document.getElementById("session-input").value.trim();
+  //   if (!id) { alert("Enter a session ID first"); return; }
+
+  //   if (ws) ws.close();
+
+  //   const protocol = location.protocol === "https:" ? "wss" : "ws";
+  //   ws = new WebSocket(`${protocol}://${location.host}/ws/live/${id}`);
+
+  //   document.getElementById("live-btn").classList.add("active");
+  //   document.getElementById("live-btn").textContent = "Live — connected";
+
+  //   ws.onmessage = (e) => {
+  //     const msg = JSON.parse(e.data);
+  //     if (msg.event === "update" && msg.nodes) {
+  //       renderNodes(msg.nodes);
+  //     }
+  //   };
+
+  //   ws.onclose = () => {
+  //     document.getElementById("live-btn").classList.remove("active");
+  //     document.getElementById("live-btn").textContent = "Connect live session";
+  //   };
+  // }
+
+
+  // SSE version for live updates
+  let sse = null;
+let currentSessionId = null;
+let autoRefreshInterval = null;
 
 function connectLive() {
-  const id = document.getElementById("session-input").value.trim();
-  if (!id) { alert("Enter a session ID first"); return; }
+  const id = document.getElementById(
+    "session-input"
+  ).value.trim();
+  if (!id) {
+    alert("Enter a session ID first");
+    return;
+  }
 
-  if (ws) ws.close();
+  // close existing connection
+  if (sse) {
+    sse.close();
+    sse = null;
+  }
 
-  const protocol = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${protocol}://${location.host}/ws/live/${id}`);
+  currentSessionId = id;
+  sse = new EventSource(`/stream/${id}`);
 
   document.getElementById("live-btn").classList.add("active");
-  document.getElementById("live-btn").textContent = "Live — connected";
+  document.getElementById("live-btn").textContent = (
+    "Live — connected"
+  );
 
-  ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    if (msg.event === "update" && msg.nodes) {
-      renderNodes(msg.nodes);
+  sse.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.event === "update" && msg.nodes) {
+        renderNodes(msg.nodes);
+      }
+    } catch (err) {
+      console.error("SSE parse error:", err);
     }
   };
 
-  ws.onclose = () => {
-    document.getElementById("live-btn").classList.remove("active");
-    document.getElementById("live-btn").textContent = "Connect live session";
+  sse.onerror = () => {
+    document.getElementById("live-btn")
+      .classList.remove("active");
+    document.getElementById("live-btn").textContent = (
+      "Connect live session"
+    );
   };
+
+  sse.onopen = () => {
+    console.log("SSE connected for session:", id);
+  };
+}
+
+function disconnectLive() {
+  if (sse) {
+    sse.close();
+    sse = null;
+  }
+  document.getElementById("live-btn")
+    .classList.remove("active");
+  document.getElementById("live-btn").textContent = (
+    "Connect live session"
+  );
 }
 
 // ─── ANIMATION ─────────────────────────────────────────────
