@@ -9,9 +9,8 @@ import uuid
 import logging
 from langchain_ollama import ChatOllama
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI 
+from langchain_openai import ChatOpenAI
 from langchain_groq import ChatGroq
-
 from langchain_classic.agents import (
     AgentExecutor,
     create_openai_tools_agent
@@ -34,9 +33,14 @@ from intelligence.drift_detector import DriftDetector
 
 logging.basicConfig(level=logging.WARNING)
 
-os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY", "")
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
-os.environ["GROQ_API_KEY"] = os.getenv("GROQ_API_KEY", "")
+# -------------------------------------------------
+# model constants
+# -------------------------------------------------
+
+OllamaModel = "qwen2.5:0.5b"
+GeminiModel = "gemini-1.5-flash"
+OpenAIModel = "gpt-3.5-turbo"
+GroqModel = "llama-3.1-8b-instant"
 
 # -------------------------------------------------
 # tools
@@ -80,14 +84,49 @@ EXTENDED_TOOLS = [
     save_note, read_file, write_file
 ]
 
-OllamaModel = "qwen2.5:0.5b"
-geminiModel = "gemini-1.5-flash-100b"  # or "gemini-1.5-pro-flash-100b" for Pro users
-OpenAIModel = "gpt-3.5-turbo"
-GroqModel = "llama-3.1-8b-instant"
-llms = [OllamaModel, geminiModel, OpenAIModel, GroqModel]
+# -------------------------------------------------
+# llm builder
+# -------------------------------------------------
+
+def build_llm(model: str, adapter):
+    """Build LLM for given model with adapter callbacks."""
+    if model == OllamaModel:
+        return ChatOllama(
+            model=model,
+            temperature=0,
+            streaming=True,
+            callbacks=[adapter],
+        )
+    if model == GeminiModel:
+        return ChatGoogleGenerativeAI(
+            model=model,
+            temperature=0,
+            streaming=True,
+            callbacks=[adapter],
+            convert_system_message_to_human=True,
+        )
+    if model == OpenAIModel:
+        return ChatOpenAI(
+            model=model,
+            temperature=0,
+            streaming=True,
+            callbacks=[adapter],
+        )
+    if model == GroqModel:
+        return ChatGroq(
+            model=model,
+            temperature=0,
+            streaming=True,
+            callbacks=[adapter],
+            max_tokens=1024,
+        )
+    raise ValueError(
+        f"Unknown model: {model}. "
+        f"Available: {[OllamaModel, GeminiModel, OpenAIModel, GroqModel]}"
+    )
 
 # -------------------------------------------------
-# core agent runner — reusable
+# core agent runner
 # -------------------------------------------------
 
 async def run_agent_task(
@@ -100,6 +139,10 @@ async def run_agent_task(
     if tools is None:
         tools = BASIC_TOOLS
 
+    # shared session id
+    session_id = str(uuid.uuid4())
+    task_id = task_id or str(uuid.uuid4())
+
     # setup database
     db_writer = DatabaseWriter()
     await db_writer.connect()
@@ -111,24 +154,16 @@ async def run_agent_task(
     await pattern_library.setup()
 
     # setup Redis embedding worker
-    # pushes to embedding service — never blocks agent
     embedding_worker = EmbeddingWorker()
     await embedding_worker.start()
 
     # setup write queue
     write_queue = AsyncWriteQueue(db_writer=db_writer)
     await write_queue.start()
-    
-    #  # CREATE PARENT NODE FIRST
-    # parent_node_id = str(uuid.uuid4())
-    # session_id = str(uuid.uuid4())
-    
-    # setup token buffer
-    # writes micro skeletons immediately to database
-    # pushes content to Redis for embedding
+
+    # setup token buffer — uses shared session_id
     token_buffer = TokenBuffer(
-        session_id=str(uuid.uuid4()),
-        # parent_node_id=parent_node_id,
+        session_id=session_id,
         batch_size=20,
         batch_interval_ms=100,
         db_writer=db_writer,
@@ -136,12 +171,15 @@ async def run_agent_task(
     )
     await token_buffer.start()
 
-    # setup tracer core
+    # setup tracer core — uses same session_id
     tracer_core = TracerCore(
-        task_id=task_id or str(uuid.uuid4()),
+        task_id=task_id,
         write_queue=write_queue,
         token_buffer=token_buffer,
     )
+    # override session_id to match token_buffer
+    tracer_core.session_id = session_id
+    tracer_core.tree.session_id = session_id
 
     # setup drift detector
     drift_detector = DriftDetector(
@@ -156,48 +194,8 @@ async def run_agent_task(
         embedding_worker=embedding_worker,
     )
 
-    # setup llm
-    
-    
-    if(model == OllamaModel):
-    #ollam llm with streaming and callbacks to capture tokens and micro skeletons
-    
-        llm = ChatOllama(
-            model=model,
-            temperature=0,
-            streaming=True,
-            callbacks=[adapter],
-        )
-    else:
-        if(model == geminiModel):
-    # gemini llm with streaming and callbacks to capture tokens and micro skeletons
-            llm = ChatGoogleGenerativeAI(
-                model=model,
-                temperature=0,
-                streaming=True,
-                callbacks=[adapter],
-                convert_system_message_to_human=True,
-            )
-        else:
-            if(model == OpenAIModel):
-    
-    # openai llm with streaming and callbacks to capture tokens and micro skeletons
-                llm = ChatOpenAI(
-                    model=model,
-                    temperature=0,
-                    streaming=True,
-                    callbacks=[adapter],
-                )
-            else:
-                if(model == GroqModel):
-    # groq llm with streaming and callbacks to capture tokens and micro skeletons
-                    llm = ChatGroq(
-                        model=model,
-                        temperature=0,
-                        streaming=True,
-                        callbacks=[adapter],
-                        max_tokens=1024,
-                    )
+    # build llm
+    llm = build_llm(model, adapter)
 
     prompt = ChatPromptTemplate.from_messages([
         (
@@ -212,9 +210,7 @@ async def run_agent_task(
         ),
     ])
 
-    agent = create_openai_tools_agent(
-        llm, tools, prompt
-    )
+    agent = create_openai_tools_agent(llm, tools, prompt)
     executor = AgentExecutor(
         agent=agent,
         tools=tools,
@@ -234,41 +230,43 @@ async def run_agent_task(
     })
 
     if verbose:
-        print(
-            f"\nAGENT OUTPUT: "
-            f"{result.get('output', '')}"
-        )
+        print(f"\nAGENT OUTPUT: {result.get('output', '')}")
 
     # flush queues
     await write_queue.stop()
     await token_buffer.stop()
 
-    # give embedding service time to process queue
-    # embeddings happen in separate process — just wait
-    await asyncio.sleep(3)
+    # wait for embedding queue to drain
+    print("Waiting for embeddings...")
+    max_wait = 30
+    waited = 0
+    while waited < max_wait:
+        await asyncio.sleep(1)
+        waited += 1
+        sizes = embedding_worker.queue_client.get_queue_size()
+        node_q = sizes.get("node_queue", 0)
+        micro_q = sizes.get("micro_queue", 0)
+        if node_q == 0 and micro_q == 0:
+            print(f"Embeddings done in {waited}s.")
+            break
+        if waited % 5 == 0:
+            print(
+                f"Queue: {node_q} nodes "
+                f"{micro_q} micros remaining..."
+            )
 
-    worker_stats = embedding_worker.get_stats()
+    await asyncio.sleep(0.5)
     await embedding_worker.stop()
 
-    if verbose:
-        print(
-            f"Queued for embedding: "
-            f"{worker_stats['queued_count']}"
-        )
-        print(
-            f"Queue remaining: "
-            f"{worker_stats['queue_sizes']}"
-        )
-
-    # fetch final state from database
+    # fetch summary and health
     summary = tracer_core.get_summary()
     health = drift_detector.get_trajectory_summary()
+
+    # embed goal for pattern classification
     goal_vec = await encoder._embed(task)
 
+    # fetch node embeddings from database
     all_nodes = tracer_core.get_tree().get_all_nodes()
-
-    # fetch embeddings from db
-    # embedding service wrote them asynchronously
     node_embeddings = []
     async with db_writer.pool.acquire() as conn:
         for node in all_nodes:
