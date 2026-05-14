@@ -3,127 +3,124 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AgentTrace HD — Live Execution Visualizer</title>
+<title>AgentTrace HD</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #0a0a0f; color: #e0e0e0; font-family: monospace; overflow: hidden; }
-  #canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
-
-  #hud { position: fixed; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; }
-
-  #header { position: fixed; top: 20px; left: 20px; pointer-events: all; }
-  #header h1 { font-size: 14px; font-weight: normal; color: #7df9ff; letter-spacing: 0.15em; text-transform: uppercase; }
-  #header p { font-size: 11px; color: #555; margin-top: 4px; }
-
-  #controls { position: fixed; top: 20px; right: 20px; pointer-events: all; display: flex; flex-direction: column; gap: 8px; }
-  #session-input { background: #111; border: 0.5px solid #333; color: #e0e0e0; padding: 6px 10px; font-family: monospace; font-size: 11px; width: 280px; outline: none; }
-  #session-input:focus { border-color: #7df9ff; }
-  .btn { background: transparent; border: 0.5px solid #444; color: #aaa; padding: 6px 12px; font-family: monospace; font-size: 11px; cursor: pointer; text-align: left; }
-  .btn:hover { border-color: #7df9ff; color: #7df9ff; }
-  .btn.active { border-color: #7df9ff; color: #7df9ff; }
-
-  #stats { position: fixed; bottom: 20px; left: 20px; pointer-events: none; }
-  .stat-row { font-size: 11px; color: #555; margin-bottom: 4px; }
-  .stat-row span { color: #7df9ff; margin-left: 8px; }
-
-  #legend { position: fixed; bottom: 20px; right: 20px; pointer-events: none; }
-  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #666; margin-bottom: 6px; }
-  .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
-
-  #status { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 12px; color: #444; text-align: center; pointer-events: none; }
-
-  #node-tooltip {
-    position: fixed; background: #111; border: 0.5px solid #333;
-    padding: 10px 14px; font-size: 11px; pointer-events: none;
-    display: none; max-width: 240px; line-height: 1.6;
-  }
-  .tt-row { color: #555; }
-  .tt-row span { color: #e0e0e0; }
-  .tt-highlight { color: #7df9ff; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #e0e0e0; font-family: monospace; overflow: hidden; }
+#canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; }
+#header { position: fixed; top: 20px; left: 20px; pointer-events: none; }
+#header h1 { font-size: 13px; font-weight: normal; color: #7df9ff; letter-spacing: 0.15em; text-transform: uppercase; }
+#header p { font-size: 10px; color: #444; margin-top: 3px; }
+#conn-status { font-size: 10px; margin-top: 6px; }
+#conn-status.connected { color: #98fb98; }
+#conn-status.disconnected { color: #ff6b6b; }
+#conn-status.reconnecting { color: #ffd700; }
+#controls { position: fixed; top: 20px; right: 20px; display: flex; flex-direction: column; gap: 6px; }
+#session-input { background: #0d0d14; border: 0.5px solid #2a2a3a; color: #e0e0e0; padding: 6px 10px; font-family: monospace; font-size: 11px; width: 260px; outline: none; }
+#session-input:focus { border-color: #7df9ff; }
+.btn { background: transparent; border: 0.5px solid #2a2a3a; color: #666; padding: 5px 10px; font-family: monospace; font-size: 10px; cursor: pointer; text-align: left; transition: all 0.15s; }
+.btn:hover { border-color: #7df9ff; color: #7df9ff; }
+.btn.active { border-color: #98fb98; color: #98fb98; }
+#stats { position: fixed; bottom: 20px; left: 20px; pointer-events: none; }
+.stat-row { font-size: 10px; color: #444; margin-bottom: 3px; }
+.stat-row span { color: #7df9ff; margin-left: 6px; }
+#legend { position: fixed; bottom: 20px; right: 20px; pointer-events: none; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 10px; color: #555; margin-bottom: 5px; }
+.legend-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+#status-msg { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 11px; color: #333; text-align: center; pointer-events: none; }
+#tooltip { position: fixed; background: #0d0d14; border: 0.5px solid #2a2a3a; padding: 8px 12px; font-size: 10px; pointer-events: none; display: none; max-width: 220px; line-height: 1.7; z-index: 100; }
+.tt-label { color: #7df9ff; margin-bottom: 4px; font-size: 11px; }
+.tt-row { color: #444; }
+.tt-row span { color: #ccc; }
 </style>
 </head>
 <body>
-
 <canvas id="canvas"></canvas>
 
-<div id="hud">
-  <div id="header">
-    <h1>AgentTrace HD</h1>
-    <p>High-Dimensional Execution Space</p>
-  </div>
-
-  <div id="controls">
-    <input id="session-input" type="text" placeholder="Enter session ID..." />
-    <button class="btn" onclick="loadSession()">Load completed session</button>
-    <button class="btn" id="live-btn" onclick="connectLive()">Connect live session</button>
-    <button class="btn" onclick="loadLatestSession()">Load latest session</button>
-    <button class="btn" onclick="loadMicroSession()">Load micro trajectory</button>
-    <button class="btn" onclick="resetView()">Reset view</button>
-  </div>
-
-  <div id="stats">
-    <div class="stat-row">nodes <span id="stat-nodes">0</span></div>
-    <div class="stat-row">reasoning hops <span id="stat-reasoning">0</span></div>
-    <div class="stat-row">tool calls <span id="stat-tools">0</span></div>
-    <div class="stat-row">errors <span id="stat-errors">0</span></div>
-    <div class="stat-row">current step <span id="stat-step">—</span></div>
-  </div>
-
-  <div id="legend">
-    <div class="legend-item"><div class="legend-dot" style="background:#7df9ff"></div>reasoning</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#ffd700"></div>tool call</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#98fb98"></div>tool response</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#ff6b6b"></div>error</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#ffffff; box-shadow: 0 0 6px #fff"></div>current head</div>
-  </div>
-
-  <div id="status">Enter a session ID above<br>or connect to a live session</div>
+<div id="header">
+  <h1>AgentTrace HD</h1>
+  <p>High-Dimensional Execution Space</p>
+  <div id="conn-status" class="disconnected">● offline</div>
 </div>
 
-<div id="node-tooltip"></div>
+<div id="controls">
+  <input id="session-input" type="text" placeholder="Session ID..." />
+  <button class="btn" onclick="loadLatestSession()">Load latest session</button>
+  <button class="btn" onclick="loadCombined()">Load micro trajectory</button>
+  <button class="btn" id="live-btn" onclick="toggleLive()">Connect live</button>
+  <button class="btn" onclick="clearScene()">Clear scene</button>
+  <button class="btn" onclick="resetView()">Reset view</button>
+</div>
+
+<div id="stats">
+  <div class="stat-row">nodes <span id="stat-nodes">0</span></div>
+  <div class="stat-row">reasoning <span id="stat-reasoning">0</span></div>
+  <div class="stat-row">tool calls <span id="stat-tools">0</span></div>
+  <div class="stat-row">errors <span id="stat-errors">0</span></div>
+  <div class="stat-row">step <span id="stat-step">—</span></div>
+  <div class="stat-row">micro <span id="stat-micro">0</span></div>
+</div>
+
+<div id="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#7df9ff"></div>reasoning</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ffd700"></div>tool call</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#98fb98"></div>tool response</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f11a1a"></div>error</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#fff"></div>head</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ff93d6"></div>micro token</div>
+</div>
+
+<div id="status-msg">Load a session or connect live</div>
+<div id="tooltip"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
-// ─── SCENE SETUP ───────────────────────────────────────────
+// ── RENDERER ──────────────────────────────────────────────
 const canvas = document.getElementById("canvas");
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+const renderer = new THREE.WebGLRenderer({
+  canvas, antialias: true, alpha: true
+});
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 1000);
-camera.position.set(0, 0, 8);
+const camera = new THREE.PerspectiveCamera(
+  60, window.innerWidth / window.innerHeight, 0.01, 1000
+);
+camera.position.set(0, 2, 10);
 
-// ambient light
-scene.add(new THREE.AmbientLight(0xffffff, 0.4));
-const dirLight = new THREE.DirectionalLight(0x7df9ff, 0.6);
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const dirLight = new THREE.DirectionalLight(0x7df9ff, 0.4);
 dirLight.position.set(5, 5, 5);
 scene.add(dirLight);
 
-// grid
-const gridHelper = new THREE.GridHelper(20, 40, 0x1a1a2e, 0x1a1a2e);
-scene.add(gridHelper);
+const grid = new THREE.GridHelper(20, 40, 0x111122, 0x111122);
+scene.add(grid);
 
-// ─── CAMERA ORBIT ──────────────────────────────────────────
+// ── CAMERA ORBIT ──────────────────────────────────────────
 let isDragging = false;
 let prevMouse = { x: 0, y: 0 };
-let spherical = { theta: 0, phi: Math.PI / 3, r: 8 };
+let spherical = { theta: 0.3, phi: 1.1, r: 10 };
 
-canvas.addEventListener("mousedown", e => { isDragging = true; prevMouse = { x: e.clientX, y: e.clientY }; });
-canvas.addEventListener("mouseup", () => isDragging = false);
+canvas.addEventListener("mousedown", e => {
+  isDragging = true;
+  prevMouse = { x: e.clientX, y: e.clientY };
+});
+window.addEventListener("mouseup", () => isDragging = false);
 canvas.addEventListener("mousemove", e => {
   if (!isDragging) { checkHover(e); return; }
-  const dx = e.clientX - prevMouse.x;
-  const dy = e.clientY - prevMouse.y;
-  spherical.theta -= dx * 0.005;
-  spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi - dy * 0.005));
+  spherical.theta -= (e.clientX - prevMouse.x) * 0.005;
+  spherical.phi = Math.max(0.1, Math.min(
+    Math.PI - 0.1,
+    spherical.phi - (e.clientY - prevMouse.y) * 0.005
+  ));
   prevMouse = { x: e.clientX, y: e.clientY };
   updateCamera();
 });
 canvas.addEventListener("wheel", e => {
-  spherical.r = Math.max(2, Math.min(30, spherical.r + e.deltaY * 0.01));
+  spherical.r = Math.max(2, Math.min(40, spherical.r + e.deltaY * 0.01));
   updateCamera();
-});
+}, { passive: true });
 
 function updateCamera() {
   camera.position.set(
@@ -133,101 +130,120 @@ function updateCamera() {
   );
   camera.lookAt(0, 0, 0);
 }
+updateCamera();
 
 function resetView() {
-  spherical = { theta: 0, phi: Math.PI / 3, r: 8 };
+  spherical = { theta: 0.3, phi: 1.1, r: 10 };
   updateCamera();
 }
 
-// ─── NODE COLORS ───────────────────────────────────────────
-const NODE_COLORS = {
+// ── COLORS ────────────────────────────────────────────────
+const COLORS = {
   reasoning:     0x7df9ff,
   tool_call:     0xffd700,
   tool_response: 0x98fb98,
+  micro:         0xff93d6,
   error:         0xff6b6b,
-  head:          0xffffff,
+  unknown:       0x666666,
 };
 
-function getColor(node) {
-  if (node.status === "error") return NODE_COLORS.error;
-  return NODE_COLORS[node.node_type] || 0xaaaaaa;
+function nodeColor(type, status) {
+  if (status === "error") return COLORS.error;
+  return COLORS[type] || COLORS.unknown;
 }
 
-// ─── SCENE STATE ───────────────────────────────────────────
-let nodeMeshes = [];
-let trailPoints = [];
-let trailLine = null;
+// ── SCENE STATE ───────────────────────────────────────────
+// Registry maps node_id → { mesh, data }
+let registry = {};
+let meshList = [];
+let trailObjects = [];
+
+// head state
 let headMesh = null;
-let currentNodes = [];
-
-function getNodeColor(nodeType, status) {
-  if (status === "error") return NODE_COLORS.error;
-  return NODE_COLORS[nodeType] || 0xaaaaaa;
-}
+let headGlow = null;
+let headCurrent = new THREE.Vector3();
+let headTarget = new THREE.Vector3();
+let headMoving = false;
 
 function clearScene() {
-  nodeMeshes.forEach(m => scene.remove(m));
-  nodeMeshes = [];
-  trailPoints = [];
-  if (trailLine) scene.remove(trailLine);
-  trailLine = null;
+  // remove all tracked objects
+  meshList.forEach(m => scene.remove(m));
+  trailObjects.forEach(o => scene.remove(o));
   if (headMesh) scene.remove(headMesh);
+  if (headGlow) scene.remove(headGlow);
+
+  meshList = [];
+  trailObjects = [];
+  registry = {};
   headMesh = null;
-  currentNodes = [];
+  headGlow = null;
+  headMoving = false;
+
   updateStats([]);
-  document.getElementById("status").style.display = "none";
+  document.getElementById("status-msg").style.display = "block";
 }
 
-
-let nodeRegistry = {};
-
+// ── NODE RENDERING ────────────────────────────────────────
 function renderNodes(nodes) {
   if (!nodes || nodes.length === 0) return;
+  document.getElementById("status-msg").style.display = "none";
 
-  const sorted = [...nodes].sort(
-    (a, b) => (a.step_number || 0) - (b.step_number || 0)
-  );
+  nodes.forEach(node => {
+    const id = node.node_id;
+    if (!id) return;
 
-  sorted.forEach(node => {
-    const existing = nodeRegistry[node.node_id];
+    const existing = registry[id];
 
     if (!existing) {
-      // new node — add to scene immediately
-      addNodeToScene(node);
-      nodeRegistry[node.node_id] = node;
-    } else if (
-      !existing.has_embedding && node.has_embedding
-    ) {
-      // position update — snap to real HD coordinates
-      updateNodePosition(node);
-      nodeRegistry[node.node_id] = node;
+      // brand new node — add immediately
+      const mesh = createNodeMesh(node);
+      if (mesh) {
+        scene.add(mesh);
+        meshList.push(mesh);
+        registry[id] = { mesh, data: node };
+      }
+    } else if (!existing.data.has_embedding && node.has_embedding) {
+      // position update — snap to real HD coords
+      existing.mesh.position.set(
+        (node.x || 0) * 3,
+        (node.y || 0) * 3,
+        (node.z || 0) * 3
+      );
+      existing.data = node;
+      // brighten micro on position arrival
+      if (node.node_type === "micro") {
+        existing.mesh.material.opacity = 0.80;
+        existing.mesh.material.emissiveIntensity = 0.02;
+      }
+    } else if (existing.data.status !== node.status) {
+      // status update — recolor
+      const color = nodeColor(node.node_type, node.status);
+      existing.mesh.material.color.setHex(color);
+      existing.mesh.material.emissive.setHex(color);
+      existing.data = node;
     }
   });
 
-  updateHead(sorted);
-  rebuildTrails(sorted);
-  updateStats(
-    sorted.filter(n => n.is_parent)
-  );
+  rebuildTrails();
+  updateHeadPosition(nodes);
+  updateStats(nodes);
 }
 
-function addNodeToScene(node) {
+function createNodeMesh(node) {
   const isMicro = node.node_type === "micro";
   const isParent = node.is_parent;
-
-  const size = isParent ? 0.09 : 0.025;
+  const size = isParent ? 0.08 : 0.022;
   const color = isParent
-    ? getNodeColor(node.node_type, node.status)
-    : 0x223355;
-  const opacity = isParent ? 0.9 : 0.4;
+    ? nodeColor(node.node_type, node.status)
+    : COLORS.micro;
 
-  const geo = new THREE.SphereGeometry(size, 8, 8);
+  const geo = new THREE.SphereGeometry(size, isParent ? 12 : 6, isParent ? 12 : 6);
   const mat = new THREE.MeshPhongMaterial({
     color,
     emissive: color,
-    emissiveIntensity: isParent ? 0.3 : 0.05,
+    emissiveIntensity: isParent ? 0.25 : 0.14,
     transparent: true,
-    opacity,
+    opacity: isParent ? 0.9 : 0.35,
   });
 
   const mesh = new THREE.Mesh(geo, mat);
@@ -238,335 +254,229 @@ function addNodeToScene(node) {
   );
   mesh.userData = node;
   mesh.name = node.node_id;
-  scene.add(mesh);
-  nodeMeshes.push(mesh);
+  return mesh;
 }
 
-function updateNodePosition(node) {
-  const mesh = scene.getObjectByName(node.node_id);
-  if (!mesh) return;
+// ── TRAILS ────────────────────────────────────────────────
+function rebuildTrails() {
+  // remove old trails
+  trailObjects.forEach(o => scene.remove(o));
+  trailObjects = [];
 
-  // smooth snap to real position
-  const target = new THREE.Vector3(
-    (node.x || 0) * 3,
-    (node.y || 0) * 3,
-    (node.z || 0) * 3
-  );
-  mesh.position.copy(target);
-  mesh.userData = node;
+  const allData = Object.values(registry).map(r => r.data);
 
-  // brighten when real position arrives
-  if (node.node_type === "micro") {
-    mesh.material.opacity = 0.6;
-    mesh.material.emissiveIntensity = 0.15;
+  // parent trail
+  const parents = allData
+    .filter(n => n.is_parent && n.has_embedding)
+    .sort((a, b) => (a.step_number || 0) - (b.step_number || 0));
+
+  if (parents.length > 1) {
+    const pts = parents.map(n => new THREE.Vector3(
+      (n.x || 0) * 3, (n.y || 0) * 3, (n.z || 0) * 3
+    ));
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0x334466 })
+    );
+    scene.add(line);
+    trailObjects.push(line);
+  }
+
+  // micro trail
+  const micros = allData
+    .filter(n => n.node_type === "micro" && n.has_embedding)
+    .sort((a, b) => (a.step_number || 0) - (b.step_number || 0));
+
+  if (micros.length > 1) {
+    const pts = micros.map(n => new THREE.Vector3(
+      (n.x || 0) * 3, (n.y || 0) * 3, (n.z || 0) * 3
+    ));
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0x112233 })
+    );
+    scene.add(line);
+    trailObjects.push(line);
   }
 }
 
-function updateHead(sorted) {
-  const parents = sorted.filter(n => n.is_parent);
+// ── HEAD ──────────────────────────────────────────────────
+function updateHeadPosition(nodes) {
+  const parents = nodes
+    .filter(n => n.is_parent && n.has_embedding)
+    .sort((a, b) => (a.step_number || 0) - (b.step_number || 0));
+
   if (parents.length === 0) return;
 
-  const lastParent = parents[parents.length - 1];
-
-  const targetX = (lastParent.x || 0) * 3;
-  const targetY = (lastParent.y || 0) * 3;
-  const targetZ = (lastParent.z || 0) * 3;
-
-  headTargetPos.set(targetX, targetY, targetZ);
+  const last = parents[parents.length - 1];
+  headTarget.set(
+    (last.x || 0) * 3,
+    (last.y || 0) * 3,
+    (last.z || 0) * 3
+  );
 
   if (!headMesh) {
-    headCurrentPos.set(targetX, targetY, targetZ);
+    headCurrent.copy(headTarget);
     buildHead();
   } else {
     headMoving = true;
   }
 }
 
-function rebuildTrails(sorted) {
-  const parents = sorted.filter(
-    n => n.is_parent && n.has_embedding
-  );
-  const micros = sorted.filter(
-    n => n.node_type === "micro" && n.has_embedding
-  );
+function buildHead() {
+  if (headMesh) scene.remove(headMesh);
+  if (headGlow) scene.remove(headGlow);
 
-  // parent trail
-  if (parents.length > 1) {
-    if (trailLine) scene.remove(trailLine);
-    const points = parents.map(n =>
-      new THREE.Vector3(
-        (n.x || 0) * 3,
-        (n.y || 0) * 3,
-        (n.z || 0) * 3
-      )
-    );
-    const geo = new THREE.BufferGeometry()
-      .setFromPoints(points);
-    const mat = new THREE.LineBasicMaterial({
-      color: 0x334466,
-    });
-    trailLine = new THREE.Line(geo, mat);
-    scene.add(trailLine);
-  }
-
-  // micro trail
-  if (micros.length > 1) {
-    const existing = scene.getObjectByName(
-      "micro_trail"
-    );
-    if (existing) scene.remove(existing);
-
-    const points = micros.map(n =>
-      new THREE.Vector3(
-        (n.x || 0) * 3,
-        (n.y || 0) * 3,
-        (n.z || 0) * 3
-      )
-    );
-    const geo = new THREE.BufferGeometry()
-      .setFromPoints(points);
-    const mat = new THREE.LineBasicMaterial({
-      color: 0x112233,
-    });
-    const line = new THREE.Line(geo, mat);
-    line.name = "micro_trail";
-    scene.add(line);
-  }
-}
-function updateStats(nodes) {
-  document.getElementById("stat-nodes").textContent = nodes.length;
-  document.getElementById("stat-reasoning").textContent =
-    nodes.filter(n => n.node_type === "reasoning").length;
-  document.getElementById("stat-tools").textContent =
-    nodes.filter(n => n.node_type === "tool_call").length;
-  document.getElementById("stat-errors").textContent =
-    nodes.filter(n => n.status === "error").length;
-  const maxStep = nodes.length > 0 ? Math.max(...nodes.map(n => n.step_number)) : "—";
-  document.getElementById("stat-step").textContent = maxStep;
-}
-
-function renderNodesCombined(nodes) {
-  clearScene();
-  currentNodes = nodes;
-
-  const sorted = [...nodes].sort(
-    (a, b) => a.step_number - b.step_number
-  );
-
-  const microPoints = [];
-  const parentPoints = [];
-
-  sorted.forEach((node) => {
-    const isParent = node.is_parent;
-    const isMicro = node.node_type === "micro";
-    const isHead = (
-      node === sorted[sorted.length - 1]
-    );
-
-    // size based on node type
-    const size = isParent ? 0.1 : 0.03;
-    const color = isParent
-      ? getNodeColor(node.node_type, node.status)
-      : 0x334466;
-    const emissiveIntensity = isParent ? 0.4 : 0.1;
-
-    const geo = new THREE.SphereGeometry(size, 8, 8);
-    const mat = new THREE.MeshPhongMaterial({
-      color,
-      emissive: color,
-      emissiveIntensity,
-      transparent: true,
-      opacity: isParent ? 0.9 : 0.5,
-    });
-
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(
-      node.x * 3, node.y * 3, node.z * 3
-    );
-    mesh.userData = node;
-    scene.add(mesh);
-    nodeMeshes.push(mesh);
-
-    if (isMicro) {
-      microPoints.push(
-        new THREE.Vector3(node.x * 3, node.y * 3, node.z * 3)
-      );
-    } else {
-      parentPoints.push(
-        new THREE.Vector3(node.x * 3, node.y * 3, node.z * 3)
-      );
-      trailPoints.push(
-        new THREE.Vector3(node.x * 3, node.y * 3, node.z * 3)
-      );
-    }
+  const geo = new THREE.SphereGeometry(0.12, 20, 20);
+  const mat = new THREE.MeshPhongMaterial({
+    color: 0xffffff,
+    emissive: 0xffffff,
+    emissiveIntensity: 1.0,
   });
+  headMesh = new THREE.Mesh(geo, mat);
+  headMesh.position.copy(headCurrent);
+  scene.add(headMesh);
 
-  // micro node trail — thin dim line
-  if (microPoints.length > 1) {
-    const geo = new THREE.BufferGeometry()
-      .setFromPoints(microPoints);
-    const mat = new THREE.LineBasicMaterial({
-      color: 0x223344,
-      linewidth: 1,
-    });
-    const line = new THREE.Line(geo, mat);
-    scene.add(line);
-  }
-
-  // parent node trail — brighter line
-  if (parentPoints.length > 1) {
-    const geo = new THREE.BufferGeometry()
-      .setFromPoints(parentPoints);
-    const mat = new THREE.LineBasicMaterial({
-      color: 0x334455,
-      linewidth: 1,
-    });
-    trailLine = new THREE.Line(geo, mat);
-    scene.add(trailLine);
-  }
-
-  // head on last node
-  const head = sorted[sorted.length - 1];
-  if (head) {
-    const headGeo = new THREE.SphereGeometry(0.14, 24, 24);
-    const headMat = new THREE.MeshPhongMaterial({
-      color: 0xffffff,
-      emissive: 0xffffff,
-      emissiveIntensity: 0.9,
-    });
-    headMesh = new THREE.Mesh(headGeo, headMat);
-    headMesh.position.set(
-      head.x * 3, head.y * 3, head.z * 3
-    );
-    scene.add(headMesh);
-  }
-
-  updateStats(sorted.filter(n => n.is_parent));
+  const ringGeo = new THREE.RingGeometry(0.16, 0.22, 32);
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    side: THREE.DoubleSide,
+    transparent: true,
+    opacity: 0.2,
+  });
+  headGlow = new THREE.Mesh(ringGeo, ringMat);
+  headGlow.position.copy(headCurrent);
+  scene.add(headGlow);
 }
 
-// ─── HOVER TOOLTIP ─────────────────────────────────────────
+// ── STATS ─────────────────────────────────────────────────
+function updateStats(nodes) {
+  const parents = nodes.filter(n => n.is_parent);
+  const micros = nodes.filter(n => n.node_type === "micro");
+  document.getElementById("stat-nodes").textContent = parents.length;
+  document.getElementById("stat-reasoning").textContent =
+    parents.filter(n => n.node_type === "reasoning").length;
+  document.getElementById("stat-tools").textContent =
+    parents.filter(n => n.node_type === "tool_call").length;
+  document.getElementById("stat-errors").textContent =
+    parents.filter(n => n.status === "error").length;
+  document.getElementById("stat-micro").textContent = micros.length;
+  const steps = parents.map(n => n.step_number || 0);
+  document.getElementById("stat-step").textContent =
+    steps.length > 0 ? Math.max(...steps) : "—";
+}
+
+// ── TOOLTIP ───────────────────────────────────────────────
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
-const tooltip = document.getElementById("node-tooltip");
+const tooltip = document.getElementById("tooltip");
 
 function checkHover(e) {
   mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
   mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
   raycaster.setFromCamera(mouse, camera);
-  const hits = raycaster.intersectObjects(nodeMeshes);
+  const hits = raycaster.intersectObjects(meshList);
   if (hits.length > 0) {
-    const node = hits[0].object.userData;
+    const d = hits[0].object.userData;
     tooltip.style.display = "block";
-    tooltip.style.left = (e.clientX + 16) + "px";
-    tooltip.style.top = (e.clientY - 10) + "px";
+    tooltip.style.left = (e.clientX + 14) + "px";
+    tooltip.style.top = (e.clientY - 8) + "px";
     tooltip.innerHTML = `
-      <div class="tt-highlight">${node.node_type} — step ${node.step_number}</div>
-      ${node.tool_name ? `<div class="tt-row">tool <span>${node.tool_name}</span></div>` : ""}
-      ${node.status ? `<div class="tt-row">status <span>${node.status}</span></div>` : ""}
-      ${node.latency_ms ? `<div class="tt-row">latency <span>${Math.round(node.latency_ms)}ms</span></div>` : ""}
-      <div class="tt-row">id <span>${node.node_id ? node.node_id.slice(0, 8) : "—"}...</span></div>
+      <div class="tt-label">${d.node_type} · step ${d.step_number ?? "?"}</div>
+      ${d.tool_name ? `<div class="tt-row">tool <span>${d.tool_name}</span></div>` : ""}
+      ${d.status ? `<div class="tt-row">status <span>${d.status}</span></div>` : ""}
+      ${d.latency_ms ? `<div class="tt-row">latency <span>${Math.round(d.latency_ms)}ms</span></div>` : ""}
+      ${d.content ? `<div class="tt-row">token <span>${d.content.slice(0,20)}</span></div>` : ""}
+      <div class="tt-row">id <span>${(d.node_id||"").slice(0,8)}…</span></div>
+      <div class="tt-row">embedded <span>${d.has_embedding ? "yes" : "no"}</span></div>
     `;
   } else {
     tooltip.style.display = "none";
   }
 }
 
-// ─── API CALLS ─────────────────────────────────────────────
-async function loadSession() {
-  const id = document.getElementById("session-input").value.trim();
-  if (!id) return;
-  const res = await fetch(`/session/${id}`);
-  const data = await res.json();
-  if (data.error) { alert(data.error); return; }
-  renderNodes(data.nodes);
-  document.getElementById("status").style.display = "none";
-}
-
+// ── DATA LOADING ──────────────────────────────────────────
 async function loadLatestSession() {
-  const res = await fetch("/sessions");
-  const sessions = await res.json();
-  if (!sessions.length) { alert("No sessions found"); return; }
-  const latest = sessions[0];
-  document.getElementById("session-input").value = latest.session_id;
-  const res2 = await fetch(`/session/${latest.session_id}`);
-  const data = await res2.json();
-  if (data.error) { alert(data.error); return; }
-  renderNodes(data.nodes);
-  document.getElementById("status").style.display = "none";
-  
+  try {
+    const res = await fetch("/sessions");
+    const sessions = await res.json();
+    if (!sessions.length) { alert("No sessions found"); return; }
+    const latest = sessions[0];
+    document.getElementById("session-input").value = latest.session_id;
+    await loadCombined(latest.session_id);
+  } catch (e) {
+    console.error("Load latest failed:", e);
+  }
 }
 
-async function loadMicroSession() {
-  const id = document.getElementById("session-input").value.trim();
-  if (!id) {
-    await loadLatestSession();
-    return;
+async function loadCombined(id) {
+  id = id || document.getElementById("session-input").value.trim();
+  if (!id) { alert("Enter a session ID"); return; }
+
+  try {
+    const res = await fetch(`/session/${id}/combined`);
+    const data = await res.json();
+    if (data.error) { console.warn(data.error); return; }
+    clearScene();
+    renderNodes(data.nodes);
+  } catch (e) {
+    console.error("Load combined failed:", e);
   }
-  const res = await fetch(`/session/${id}/combined`);
-  const data = await res.json();
-  if (data.error) {
-    alert(data.error);
-    return;
-  }
-  renderNodesCombined(data.nodes);
-  document.getElementById("status").style.display = "none";
 }
 
-let ws = null;
- //connect to live session via WebSocket
-  // function connectLive() {
-  //   const id = document.getElementById("session-input").value.trim();
-  //   if (!id) { alert("Enter a session ID first"); return; }
+// ── SSE LIVE CONNECTION ───────────────────────────────────
+let sse = null;
+let sseSessionId = null;
+let sseReconnectTimer = null;
+let sseReconnectDelay = 1000;
+const SSE_MAX_DELAY = 16000;
 
-  //   if (ws) ws.close();
+function setConnStatus(state) {
+  const el = document.getElementById("conn-status");
+  el.className = state;
+  el.textContent = {
+    connected: "● live",
+    disconnected: "● offline",
+    reconnecting: "● reconnecting...",
+  }[state] || "● offline";
 
-  //   const protocol = location.protocol === "https:" ? "wss" : "ws";
-  //   ws = new WebSocket(`${protocol}://${location.host}/ws/live/${id}`);
+  const btn = document.getElementById("live-btn");
+  btn.classList.toggle("active", state === "connected");
+  btn.textContent = state === "connected"
+    ? "Disconnect"
+    : state === "reconnecting"
+    ? "Reconnecting..."
+    : "Connect live";
+}
 
-  //   document.getElementById("live-btn").classList.add("active");
-  //   document.getElementById("live-btn").textContent = "Live — connected";
-
-  //   ws.onmessage = (e) => {
-  //     const msg = JSON.parse(e.data);
-  //     if (msg.event === "update" && msg.nodes) {
-  //       renderNodes(msg.nodes);
-  //     }
-  //   };
-
-  //   ws.onclose = () => {
-  //     document.getElementById("live-btn").classList.remove("active");
-  //     document.getElementById("live-btn").textContent = "Connect live session";
-  //   };
-  // }
-
-
-  // SSE version for live updates
-  let sse = null;
-let currentSessionId = null;
-let autoRefreshInterval = null;
-
-function connectLive() {
-  const id = document.getElementById(
-    "session-input"
-  ).value.trim();
-  if (!id) {
-    alert("Enter a session ID first");
-    return;
-  }
-
-  // close existing connection
+function toggleLive() {
   if (sse) {
-    sse.close();
-    sse = null;
+    stopSSE();
+  } else {
+    const id = document.getElementById("session-input").value.trim();
+    if (!id) { alert("Enter a session ID first"); return; }
+    startSSE(id);
   }
+}
 
-  currentSessionId = id;
-  sse = new EventSource(`/stream/${id}`);
+function startSSE(id) {
+  stopSSE();
+  sseSessionId = id;
+  sseReconnectDelay = 1000;
+  connectSSE();
+}
 
-  document.getElementById("live-btn").classList.add("active");
-  document.getElementById("live-btn").textContent = (
-    "Live — connected"
-  );
+function connectSSE() {
+  if (!sseSessionId) return;
+
+  sse = new EventSource(`/stream/${sseSessionId}`);
+  setConnStatus("reconnecting");
+
+  sse.onopen = () => {
+    setConnStatus("connected");
+    sseReconnectDelay = 1000;
+    console.log("SSE connected:", sseSessionId);
+  };
 
   sse.onmessage = (e) => {
     try {
@@ -575,50 +485,65 @@ function connectLive() {
         renderNodes(msg.nodes);
       }
     } catch (err) {
-      console.error("SSE parse error:", err);
+      console.warn("SSE parse error:", err);
     }
   };
 
   sse.onerror = () => {
-    document.getElementById("live-btn")
-      .classList.remove("active");
-    document.getElementById("live-btn").textContent = (
-      "Connect live session"
-    );
-  };
+    sse.close();
+    sse = null;
+    setConnStatus("reconnecting");
 
-  sse.onopen = () => {
-    console.log("SSE connected for session:", id);
+    // exponential backoff reconnect
+    sseReconnectTimer = setTimeout(() => {
+      sseReconnectDelay = Math.min(
+        sseReconnectDelay * 2, SSE_MAX_DELAY
+      );
+      connectSSE();
+    }, sseReconnectDelay);
   };
 }
 
-function disconnectLive() {
+function stopSSE() {
+  if (sseReconnectTimer) {
+    clearTimeout(sseReconnectTimer);
+    sseReconnectTimer = null;
+  }
   if (sse) {
     sse.close();
     sse = null;
   }
-  document.getElementById("live-btn")
-    .classList.remove("active");
-  document.getElementById("live-btn").textContent = (
-    "Connect live session"
-  );
+  sseSessionId = null;
+  setConnStatus("disconnected");
 }
 
-// ─── ANIMATION ─────────────────────────────────────────────
+// ── ANIMATION LOOP ────────────────────────────────────────
 let t = 0;
 function animate() {
   requestAnimationFrame(animate);
-  t += 0.01;
+  t += 0.016;
 
-  // pulse head ring
-  if (headMesh) {
-    headMesh.material.opacity = 0.15 + Math.sin(t * 3) * 0.15;
-    headMesh.lookAt(camera.position);
+  // smooth head movement
+  if (headMesh && headMoving) {
+    headCurrent.lerp(headTarget, 0.08);
+    headMesh.position.copy(headCurrent);
+    if (headGlow) {
+      headGlow.position.copy(headCurrent);
+      headGlow.lookAt(camera.position);
+      headGlow.material.opacity = 0.12 + Math.sin(t * 3) * 0.08;
+    }
+    if (headCurrent.distanceTo(headTarget) < 0.003) {
+      headCurrent.copy(headTarget);
+      headMoving = false;
+    }
+  } else if (headGlow) {
+    headGlow.lookAt(camera.position);
+    headGlow.material.opacity = 0.12 + Math.sin(t * 3) * 0.08;
   }
 
-  // gentle auto-rotate when not dragging
+  // very slow auto-rotate when idle
   if (!isDragging) {
-    spherical.theta += 0.0001;
+    spherical.theta += 0.0000015;
     updateCamera();
   }
 

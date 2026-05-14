@@ -43,12 +43,13 @@ OpenAIModel = "gpt-3.5-turbo"
 GroqModel = "llama-3.1-8b-instant"
 
 # -------------------------------------------------
-# tools
+# test tools
 # -------------------------------------------------
 
 @tool
 def search_web(query: str) -> str:
     """Search the web for information."""
+    
     return (
         f"Search results for '{query}': "
         f"Simulated result about {query}."

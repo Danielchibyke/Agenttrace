@@ -3,6 +3,7 @@ import asyncpg
 import os
 from dotenv import load_dotenv
 from tracer.node import Node
+ 
 
 load_dotenv()
 
