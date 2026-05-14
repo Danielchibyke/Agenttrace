@@ -7,8 +7,8 @@ from tracer.node import Node
 
 logger = logging.getLogger(__name__)
 
-DRIFT_ALERT_THRESHOLD = 0.6
-CRITICAL_ALERT_THRESHOLD = 0.8
+DRIFT_ALERT_THRESHOLD = 0.02
+CRITICAL_ALERT_THRESHOLD = 0.08
 
 
 class DriftDetector:

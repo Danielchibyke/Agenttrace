@@ -412,7 +412,7 @@ class PatternLibrary:
             classification = "unknown"
             confidence = "low"
         elif failure_sim == 0:
-            drift_score = 0.0
+            drift_score = -1.0
             classification = "healthy"
             confidence = "medium"
         elif success_sim == 0:
@@ -420,12 +420,11 @@ class PatternLibrary:
             classification = "failing"
             confidence = "medium"
         else:
-            drift_score = failure_sim / (
-                failure_sim + success_sim
-            )
+            # difference formula — positive means toward failure
+            drift_score = float(failure_sim - success_sim)
             classification = (
-                "failing" if drift_score > 0.6
-                else "drifting" if drift_score > 0.4
+                "failing" if drift_score > 0.08
+                else "drifting" if drift_score > 0.02
                 else "healthy"
             )
             confidence = "high"

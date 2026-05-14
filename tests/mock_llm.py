@@ -493,6 +493,6 @@ async def build_proof_dataset(
 
 if __name__ == "__main__":
     asyncio.run(build_proof_dataset(
-        success_runs_per_pattern=5,
-        failure_runs_per_pattern=3,
+        success_runs_per_pattern=8,
+        failure_runs_per_pattern=5,
     ))

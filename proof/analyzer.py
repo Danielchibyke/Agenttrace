@@ -143,7 +143,7 @@ class DriftAnalyzer:
         self,
         step_vectors: list[dict],
         outcome: str,
-        threshold: float = 0.55,
+        threshold: float = 0.02,
     ) -> dict:
         """
         Prove that geometric drift is detectable
@@ -179,9 +179,15 @@ class DriftAnalyzer:
             )
 
             total = sim_success + sim_failure
-            drift_score = (
-                sim_failure / total if total > 0 else 0.0
-            )
+            # drift_score = (
+            #     sim_failure / total if total > 0 else 0.0
+            # )
+            
+            # use difference not ratio
+            # positive = moving toward failure
+            # negative = moving toward success
+            # zero = neutral
+            drift_score = float(sim_failure - sim_success)
 
             drift_timeline.append({
                 "step": i,
